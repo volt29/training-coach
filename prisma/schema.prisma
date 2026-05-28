@@ -1,0 +1,168 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum AthleteLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum ZoneType {
+  PACE
+  HEART_RATE
+}
+
+enum WorkoutStatus {
+  PLANNED
+  ACCEPTED
+  DONE
+  SKIPPED
+  EXPORTED
+}
+
+enum PlanSource {
+  HUGGING_FACE
+  FALLBACK
+}
+
+enum ExportStatus {
+  SUCCESS
+  FAILED
+}
+
+model User {
+  id             String              @id @default(cuid())
+  email          String              @unique
+  passwordHash   String
+  name           String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  profile        AthleteProfile?
+  zones          IntensityZone[]
+  raceResults    RaceResult[]
+  plans          TrainingPlan[]
+  workouts       Workout[]
+  requests       GenerationRequest[]
+  exportAttempts ExportAttempt[]
+}
+
+model AthleteProfile {
+  id             String       @id @default(cuid())
+  userId         String       @unique
+  level          AthleteLevel @default(INTERMEDIATE)
+  weeklyVolumeKm Int?
+  targetRace     String?
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model IntensityZone {
+  id        String   @id @default(cuid())
+  userId    String
+  type      ZoneType
+  name      String
+  minValue  Float
+  maxValue  Float
+  unit      String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+}
+
+model RaceResult {
+  id            String   @id @default(cuid())
+  userId        String
+  distanceKm    Float
+  resultSeconds Int
+  raceDate      DateTime
+  notes         String?
+  createdAt     DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, raceDate])
+}
+
+model TrainingPlan {
+  id          String              @id @default(cuid())
+  userId      String
+  weekStart   DateTime
+  source      PlanSource
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workouts    Workout[]
+  requests    GenerationRequest[]
+
+  @@unique([userId, weekStart])
+  @@index([userId, weekStart])
+}
+
+model Workout {
+  id             String          @id @default(cuid())
+  userId         String
+  planId         String
+  date           DateTime
+  dayIndex       Int
+  sport          String          @default("run")
+  goal           String
+  title          String
+  durationMin    Int
+  zoneName       String
+  intensity      String
+  structure      String
+  notes          String?
+  status         WorkoutStatus   @default(PLANNED)
+  sortOrder      Int             @default(0)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan           TrainingPlan    @relation(fields: [planId], references: [id], onDelete: Cascade)
+  exportAttempts ExportAttempt[]
+
+  @@index([userId, date])
+  @@index([planId, dayIndex])
+}
+
+model GenerationRequest {
+  id               String        @id @default(cuid())
+  userId           String
+  planId           String?
+  weekStart        DateTime
+  workoutsCount    Int
+  goalsJson        String
+  prompt           String
+  response         String?
+  source           PlanSource
+  validationErrors String?
+  createdAt        DateTime      @default(now())
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan             TrainingPlan? @relation(fields: [planId], references: [id], onDelete: SetNull)
+
+  @@index([userId, weekStart])
+}
+
+model ExportAttempt {
+  id         String       @id @default(cuid())
+  userId     String
+  workoutId  String
+  provider   String       @default("TrainingPeaks")
+  status     ExportStatus
+  externalId String?
+  payload    String
+  createdAt  DateTime     @default(now())
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workout    Workout      @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+
+  @@index([userId, workoutId])
+}
