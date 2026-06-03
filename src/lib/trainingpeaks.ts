@@ -11,6 +11,18 @@ export interface TrainingPeaksAdapter {
   exportWorkout(userId: string, workoutId: string): Promise<TrainingPeaksExportResult>;
 }
 
+type WorkoutSegmentExportInput = {
+  label: string;
+  durationMin: number;
+  zoneName: string;
+  paceMinSecPerKm: number;
+  paceMaxSecPerKm: number;
+  heartRateMinBpm: number;
+  heartRateMaxBpm: number;
+  intensity: string;
+  notes: string | null;
+};
+
 export function buildMockTrainingPeaksPayload(workout: {
   id: string;
   date: Date;
@@ -22,6 +34,7 @@ export function buildMockTrainingPeaksPayload(workout: {
   intensity: string;
   structure: string;
   notes: string | null;
+  segments?: WorkoutSegmentExportInput[];
 }) {
   return {
     workoutId: workout.id,
@@ -34,6 +47,22 @@ export function buildMockTrainingPeaksPayload(workout: {
     zone: workout.zoneName,
     description: workout.structure,
     notes: workout.notes,
+    segments: workout.segments?.map((segment, index) => ({
+      order: index + 1,
+      label: segment.label,
+      durationMinutes: segment.durationMin,
+      zone: segment.zoneName,
+      paceSecondsPerKm: {
+        min: segment.paceMinSecPerKm,
+        max: segment.paceMaxSecPerKm
+      },
+      heartRateBpm: {
+        min: segment.heartRateMinBpm,
+        max: segment.heartRateMaxBpm
+      },
+      intensity: segment.intensity,
+      notes: segment.notes
+    })),
     provider: "TrainingPeaks",
     mode: "mock"
   };
@@ -45,6 +74,11 @@ export class MockTrainingPeaksAdapter implements TrainingPeaksAdapter {
       where: {
         id: workoutId,
         userId
+      },
+      include: {
+        segments: {
+          orderBy: { sortOrder: "asc" }
+        }
       }
     });
     const payload = buildMockTrainingPeaksPayload(workout);

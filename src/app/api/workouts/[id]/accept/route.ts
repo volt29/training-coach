@@ -24,7 +24,12 @@ export async function POST(_request: Request, { params }: Params) {
 
     const updatedWorkout = await prisma.workout.update({
       where: { id: workout.id },
-      data: { status: "ACCEPTED" }
+      data: { status: "ACCEPTED" },
+      include: {
+        segments: {
+          orderBy: { sortOrder: "asc" }
+        }
+      }
     });
 
     return Response.json({ workout: updatedWorkout });

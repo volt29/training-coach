@@ -77,7 +77,21 @@ export async function generatePlanForUser(
             intensity: workout.intensity,
             structure: workout.structure,
             notes: workout.notes,
-            sortOrder: index
+            sortOrder: index,
+            segments: {
+              create: workout.segments.map((segment, segmentIndex) => ({
+                sortOrder: segmentIndex,
+                label: segment.label,
+                durationMin: segment.durationMin,
+                zoneName: segment.zoneName,
+                paceMinSecPerKm: segment.paceMinSecPerKm,
+                paceMaxSecPerKm: segment.paceMaxSecPerKm,
+                heartRateMinBpm: segment.heartRateMinBpm,
+                heartRateMaxBpm: segment.heartRateMaxBpm,
+                intensity: segment.intensity,
+                notes: segment.notes
+              }))
+            }
           }))
         },
         requests: {
@@ -95,7 +109,12 @@ export async function generatePlanForUser(
       },
       include: {
         workouts: {
-          orderBy: [{ dayIndex: "asc" }, { sortOrder: "asc" }]
+          orderBy: [{ dayIndex: "asc" }, { sortOrder: "asc" }],
+          include: {
+            segments: {
+              orderBy: { sortOrder: "asc" }
+            }
+          }
         },
         requests: {
           orderBy: { createdAt: "desc" },
@@ -116,7 +135,12 @@ export async function getPlanForUser(userId: string, weekStart: string) {
     },
     include: {
       workouts: {
-        orderBy: [{ dayIndex: "asc" }, { sortOrder: "asc" }]
+        orderBy: [{ dayIndex: "asc" }, { sortOrder: "asc" }],
+        include: {
+          segments: {
+            orderBy: { sortOrder: "asc" }
+          }
+        }
       },
       requests: {
         orderBy: { createdAt: "desc" },

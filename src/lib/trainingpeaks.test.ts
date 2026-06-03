@@ -14,7 +14,20 @@ describe("buildMockTrainingPeaksPayload", () => {
       zoneName: "Z2",
       intensity: "umiarkowana",
       structure: "90 min spokojnie",
-      notes: null
+      notes: null,
+      segments: [
+        {
+          label: "Dlugie Z2",
+          durationMin: 90,
+          zoneName: "Z2",
+          paceMinSecPerKm: 330,
+          paceMaxSecPerKm: 389,
+          heartRateMinBpm: 138,
+          heartRateMaxBpm: 151,
+          intensity: "umiarkowana",
+          notes: null
+        }
+      ]
     });
 
     expect(payload).toMatchObject({
@@ -23,5 +36,12 @@ describe("buildMockTrainingPeaksPayload", () => {
       provider: "TrainingPeaks",
       mode: "mock"
     });
+    expect(payload.segments).toEqual([
+      expect.objectContaining({
+        label: "Dlugie Z2",
+        paceSecondsPerKm: { min: 330, max: 389 },
+        heartRateBpm: { min: 138, max: 151 }
+      })
+    ]);
   });
 });

@@ -9,21 +9,24 @@ import {
   ChevronRight,
   Download,
   Dumbbell,
+  Link2,
   LogOut,
   Move,
+  RefreshCw,
   Save,
   ShieldCheck,
   Target,
   TrendingDown,
   TrendingUp,
+  UploadCloud,
   UserRound,
   Wand2
 } from "lucide-react";
 import { signIn, signOut, useSession } from "next-auth/react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
 
-import { getMondayISO, getWeekDates } from "@/lib/dates";
+import { addDays, getMondayISO, getWeekDates, parseISODate, toISODate } from "@/lib/dates";
 
 type Profile = {
   level: "BEGINNER" | "INTERMEDIATE" | "ADVANCED";
@@ -50,7 +53,82 @@ type RaceResult = {
   notes: string | null;
 };
 
+type GarminConnectionSummary = {
+  connected: boolean;
+  mode: string | null;
+  providerUserId: string | null;
+  connectedAt: string | null;
+  lastSyncAt: string | null;
+  scopes: string[];
+  permissions: string[];
+  permissionsKnown: boolean;
+  missingPermissions: string[];
+  canImportActivities: boolean;
+  canExportWorkouts: boolean;
+};
+
+type GarminActivity = {
+  id: string;
+  externalId: string;
+  startTime: string;
+  localDate: string | null;
+  sport: string;
+  title: string;
+  distanceMeters: number | null;
+  durationSeconds: number;
+  movingDurationSeconds: number | null;
+  avgHeartRate: number | null;
+  maxHeartRate: number | null;
+  avgPaceSecondsPerKm: number | null;
+  calories: number | null;
+  trainingEffect: number | null;
+  source: string;
+  workoutId: string | null;
+  workoutTitle: string | null;
+};
+
+type GarminDashboard = {
+  connection: GarminConnectionSummary;
+  config: {
+    oauthReady: boolean;
+    activityPullReady: boolean;
+    trainingPushReady: boolean;
+    webhookSecretReady: boolean;
+    tokenEncryptionReady: boolean;
+    missing: string[];
+    requiredPermissions: string[];
+    redirectUri: string;
+    webhookUrls: {
+      activities: string;
+      permissions: string;
+      deregistration: string;
+    };
+  };
+  activities: GarminActivity[];
+};
+
+type GarminDisconnectResponse = GarminDashboard & {
+  disconnect?: {
+    remoteRevoked: boolean;
+    remoteError: string | null;
+  };
+};
+
 type WorkoutStatus = "PLANNED" | "ACCEPTED" | "DONE" | "SKIPPED" | "EXPORTED";
+
+type WorkoutSegment = {
+  id?: string;
+  sortOrder: number;
+  label: string;
+  durationMin: number;
+  zoneName: string;
+  paceMinSecPerKm: number;
+  paceMaxSecPerKm: number;
+  heartRateMinBpm: number;
+  heartRateMaxBpm: number;
+  intensity: string;
+  notes: string | null;
+};
 
 type Workout = {
   id: string;
@@ -65,6 +143,7 @@ type Workout = {
   structure: string;
   notes: string | null;
   status: WorkoutStatus;
+  segments?: WorkoutSegment[];
 };
 
 type TrainingPlan = {
@@ -154,6 +233,38 @@ const defaultZones: Zone[] = [
   { type: "HEART_RATE", name: "Z5", minValue: 179, maxValue: 194, unit: "bpm", sortOrder: 5 }
 ];
 
+const defaultGarminDashboard: GarminDashboard = {
+  connection: {
+    connected: false,
+    mode: null,
+    providerUserId: null,
+    connectedAt: null,
+    lastSyncAt: null,
+    scopes: [],
+    permissions: [],
+    permissionsKnown: false,
+    missingPermissions: [],
+    canImportActivities: false,
+    canExportWorkouts: false
+  },
+  config: {
+    oauthReady: false,
+    activityPullReady: false,
+    trainingPushReady: false,
+    webhookSecretReady: false,
+    tokenEncryptionReady: false,
+    missing: [],
+    requiredPermissions: [],
+    redirectUri: "/api/garmin/oauth/callback",
+    webhookUrls: {
+      activities: "/api/garmin/webhooks/activities",
+      permissions: "/api/garmin/webhooks/permissions",
+      deregistration: "/api/garmin/webhooks/deregistration"
+    }
+  },
+  activities: []
+};
+
 const goalLabels: Record<keyof GoalAllocation, string> = {
   easy: "Spokojne",
   tempo: "Tempo",
@@ -170,10 +281,50 @@ const statusLabels: Record<WorkoutStatus, string> = {
   EXPORTED: "Wyeksportowany"
 };
 
+const garminOAuthMessages: Record<string, string> = {
+  connected: "Garmin Connect polaczony.",
+  "oauth-error": "Garmin odrzucil autoryzacje.",
+  "missing-code": "Garmin nie zwrocil kodu autoryzacji.",
+  "invalid-state": "Sesja laczenia Garmin wygasla. Sprobuj ponownie.",
+  "token-error": "Nie udalo sie zakonczyc laczenia Garmin."
+};
+
 const dayLabels = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Nd"];
+const GARMIN_MAX_IMPORT_RANGE_DAYS = 31;
 
 function normalizeDate(value: string) {
   return value.slice(0, 10);
+}
+
+function getISODateRangeDays(startDate: string, endDate: string) {
+  try {
+    const start = parseISODate(startDate).getTime();
+    const end = parseISODate(endDate).getTime();
+    return Math.floor((end - start) / (24 * 60 * 60 * 1000)) + 1;
+  } catch {
+    return 0;
+  }
+}
+
+function getGarminImportMaxEndDate(startDate: string) {
+  try {
+    return toISODate(addDays(parseISODate(startDate), GARMIN_MAX_IMPORT_RANGE_DAYS - 1));
+  } catch {
+    return "";
+  }
+}
+
+function readGarminOAuthMessageFromLocation() {
+  if (typeof window === "undefined") return null;
+
+  const url = new URL(window.location.href);
+  const result = url.searchParams.get("garmin");
+  if (!result) return null;
+
+  url.searchParams.delete("garmin");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+
+  return garminOAuthMessages[result] ?? "Garmin Connect zwrocil nieznany status laczenia.";
 }
 
 function secondsToTime(totalSeconds: number) {
@@ -196,6 +347,16 @@ function formatPaceSeconds(totalSeconds: number) {
   const minutes = Math.floor(roundedSeconds / 60);
   const seconds = roundedSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatPaceRange(segment: WorkoutSegment) {
+  return `${formatPaceSeconds(segment.paceMinSecPerKm)}-${formatPaceSeconds(
+    segment.paceMaxSecPerKm
+  )}/km`;
+}
+
+function formatHeartRateRange(segment: WorkoutSegment) {
+  return `${segment.heartRateMinBpm}-${segment.heartRateMaxBpm} bpm`;
 }
 
 function parsePaceSeconds(value: string) {
@@ -247,10 +408,13 @@ export function TrainingCoachApp() {
   const [profile, setProfile] = useState<Profile>(defaultProfile);
   const [zones, setZones] = useState<Zone[]>(defaultZones);
   const [raceResults, setRaceResults] = useState<RaceResult[]>([]);
+  const [garmin, setGarmin] = useState<GarminDashboard>(defaultGarminDashboard);
   const [raceDistance, setRaceDistance] = useState(10);
   const [raceTime, setRaceTime] = useState("00:45:00");
   const [weekStart, setWeekStart] = useState(getMondayISO());
   const [workoutsCount, setWorkoutsCount] = useState(4);
+  const [garminImportStart, setGarminImportStart] = useState(weekStart);
+  const [garminImportEnd, setGarminImportEnd] = useState(getWeekDates(weekStart)[6]);
   const [goals, setGoals] = useState<GoalAllocation>({
     easy: 45,
     tempo: 20,
@@ -269,6 +433,40 @@ export function TrainingCoachApp() {
   const weekDates = useMemo(() => getWeekDates(weekStart), [weekStart]);
   const goalSum = Object.values(goals).reduce((sum, value) => sum + value, 0);
   const setupReady = savedSetup.profile && savedSetup.zones;
+
+  function changeWeekStart(nextWeekStart: string) {
+    setWeekStart(nextWeekStart);
+    const nextWeekDates = getWeekDates(nextWeekStart);
+    setGarminImportStart(nextWeekStart);
+    setGarminImportEnd(nextWeekDates[6]);
+  }
+
+  function changeGarminImportStart(nextStartDate: string) {
+    setGarminImportStart(nextStartDate);
+    const maxEndDate = getGarminImportMaxEndDate(nextStartDate);
+    const nextRangeDays = getISODateRangeDays(nextStartDate, garminImportEnd);
+    if (nextRangeDays <= 0) {
+      setGarminImportEnd(nextStartDate);
+    } else if (maxEndDate && nextRangeDays > GARMIN_MAX_IMPORT_RANGE_DAYS) {
+      setGarminImportEnd(maxEndDate);
+    }
+  }
+
+  function changeGarminImportEnd(nextEndDate: string) {
+    const nextRangeDays = getISODateRangeDays(garminImportStart, nextEndDate);
+    if (nextRangeDays <= 0) {
+      setGarminImportEnd(garminImportStart);
+      return;
+    }
+
+    const maxEndDate = getGarminImportMaxEndDate(garminImportStart);
+    if (maxEndDate && nextRangeDays > GARMIN_MAX_IMPORT_RANGE_DAYS) {
+      setGarminImportEnd(maxEndDate);
+      return;
+    }
+
+    setGarminImportEnd(nextEndDate);
+  }
 
   const groupedWorkouts = useMemo(() => {
     const grouped = new Map<string, Workout[]>();
@@ -298,6 +496,18 @@ export function TrainingCoachApp() {
     return counts;
   }, [plan?.workouts]);
 
+  const selectedGarminActivity = useMemo(
+    () =>
+      selectedWorkout
+        ? (garmin.activities.find((activity) => activity.workoutId === selectedWorkout.id) ?? null)
+        : null,
+    [garmin.activities, selectedWorkout]
+  );
+  const canSendToGarmin =
+    garmin.connection.connected &&
+    garmin.connection.canExportWorkouts &&
+    (garmin.connection.mode === "mock" || garmin.config.trainingPushReady);
+
   const planFingerprint = useMemo(
     () =>
       plan?.workouts
@@ -314,20 +524,31 @@ export function TrainingCoachApp() {
     [plan?.workouts]
   );
 
+  const applyPlanState = useCallback((nextPlan: TrainingPlan | null) => {
+    setPlan(nextPlan);
+    setSelectedWorkout((current) =>
+      nextPlan?.workouts.find((workout) => workout.id === current?.id) ??
+      nextPlan?.workouts[0] ??
+      null
+    );
+  }, []);
+
   useEffect(() => {
     if (status !== "authenticated") return;
 
     async function loadInitialData() {
       try {
-        const [profileResponse, zonesResponse, raceResponse] = await Promise.all([
+        const [profileResponse, zonesResponse, raceResponse, garminResponse] = await Promise.all([
           apiJson<{ profile: Profile | null }>("/api/profile"),
           apiJson<{ zones: Zone[] }>("/api/zones"),
-          apiJson<{ raceResults: RaceResult[] }>("/api/race-results")
+          apiJson<{ raceResults: RaceResult[] }>("/api/race-results"),
+          apiJson<GarminDashboard>("/api/garmin")
         ]);
 
         setProfile(profileResponse.profile ?? defaultProfile);
         setZones(zonesResponse.zones.length > 0 ? zonesResponse.zones : defaultZones);
         setRaceResults(raceResponse.raceResults);
+        setGarmin(garminResponse);
         const setupIsReady = Boolean(profileResponse.profile) && zonesResponse.zones.length > 0;
         setSavedSetup({
           profile: Boolean(profileResponse.profile),
@@ -335,6 +556,13 @@ export function TrainingCoachApp() {
         });
         if (!setupIsReady) {
           setActiveView("setup");
+        }
+        const garminOAuthMessage = readGarminOAuthMessageFromLocation();
+        if (garminOAuthMessage) {
+          setMessage(garminOAuthMessage);
+          if (setupIsReady) {
+            setActiveView("review");
+          }
         }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : "Nie udało się pobrać danych.");
@@ -352,15 +580,14 @@ export function TrainingCoachApp() {
         const response = await apiJson<{ plan: TrainingPlan | null }>(
           `/api/plans?weekStart=${weekStart}`
         );
-        setPlan(response.plan);
-        setSelectedWorkout(response.plan?.workouts[0] ?? null);
+        applyPlanState(response.plan);
       } catch (error) {
         setMessage(error instanceof Error ? error.message : "Nie udało się pobrać planu.");
       }
     }
 
     void loadPlan();
-  }, [status, weekStart]);
+  }, [applyPlanState, status, weekStart]);
 
   useEffect(() => {
     if (status !== "authenticated") return;
@@ -497,7 +724,7 @@ export function TrainingCoachApp() {
     const nextWorkoutsCount = overrides.workoutsCount ?? workoutsCount;
     const nextGoals = overrides.goals ?? goals;
     try {
-      if (overrides.workoutsCount) {
+      if (overrides.workoutsCount !== undefined) {
         setWorkoutsCount(overrides.workoutsCount);
       }
 
@@ -545,6 +772,17 @@ export function TrainingCoachApp() {
         goals: insights.recommendation.suggestedGoals
       },
       "Plan wygenerowany automatycznie na podstawie rekomendacji coacha."
+    );
+  }
+
+  async function generatePlanWithRecommendedGoals() {
+    if (!insights) return;
+
+    await generatePlan(
+      {
+        goals: insights.recommendation.suggestedGoals
+      },
+      "Plan wygenerowany z rekomendowanym rozkładem celów."
     );
   }
 
@@ -660,6 +898,161 @@ export function TrainingCoachApp() {
     }
   }
 
+  async function sendWorkoutToGarmin(id: string) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<{
+        export: { reused?: boolean };
+        workout: Workout;
+      }>(`/api/workouts/${id}/garmin`, {
+        method: "POST"
+      });
+      setPlan((current) =>
+        current && response.workout
+          ? {
+              ...current,
+              workouts: current.workouts.map((workout) =>
+                workout.id === id ? response.workout : workout
+              )
+            }
+          : current
+      );
+      if (response.workout) {
+        setSelectedWorkout(response.workout);
+      }
+      setMessage(
+        response.export.reused
+          ? "Ten trening byl juz w kalendarzu Garmin."
+          : "Trening wyslany do kalendarza Garmin."
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udalo sie wyslac do Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendWeekToGarmin() {
+    if (!plan) return;
+
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<{
+        plan: TrainingPlan | null;
+        exportedCount: number;
+        failedCount: number;
+        reusedCount: number;
+        skippedCount: number;
+      }>("/api/garmin/calendar/export-week", {
+        method: "POST",
+        body: JSON.stringify({ weekStart })
+      });
+      applyPlanState(response.plan);
+      setMessage(
+        response.failedCount > 0
+          ? `Garmin: wyslano ${response.exportedCount}, bledy ${response.failedCount}, pominieto ${response.skippedCount}.`
+          : `Garmin: nowe ${response.exportedCount}, juz byly ${response.reusedCount}, pominieto ${response.skippedCount}.`
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udalo sie wyslac tygodnia do Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function connectGarminMock() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<GarminDashboard>("/api/garmin/connect/mock", {
+        method: "POST"
+      });
+      setGarmin(response);
+      setMessage("Garmin Connect polaczony w trybie mock.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udalo sie polaczyc Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectGarmin() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<GarminDisconnectResponse>("/api/garmin", {
+        method: "DELETE"
+      });
+      setGarmin({
+        connection: response.connection,
+        config: response.config,
+        activities: response.activities
+      });
+      setMessage(
+        response.disconnect?.remoteError
+          ? "Garmin Connect rozlaczony lokalnie. Zdalne wyrejestrowanie nie powiodlo sie."
+          : "Garmin Connect rozlaczony."
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udalo sie rozlaczyc Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshGarminPermissions() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<GarminDashboard>("/api/garmin/permissions/refresh", {
+        method: "POST"
+      });
+      setGarmin(response);
+      setMessage("Zgody Garmin odswiezone.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udalo sie odswiezyc zgody Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importGarminActivities() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<
+        GarminDashboard & { importedCount: number; matchedWorkoutCount: number }
+      >(
+        "/api/garmin/activities/import",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            startDate: garminImportStart,
+            endDate: garminImportEnd
+          })
+        }
+      );
+      setGarmin({
+        connection: response.connection,
+        config: response.config,
+        activities: response.activities
+      });
+      const planResponse = await apiJson<{ plan: TrainingPlan | null }>(
+        `/api/plans?weekStart=${weekStart}`
+      );
+      applyPlanState(planResponse.plan);
+      setMessage(
+        `Zaimportowano aktywnosci Garmin: ${response.importedCount}. Dopasowano treningi: ${response.matchedWorkoutCount}.`
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udalo sie pobrac danych Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (status === "loading") {
     return <LoadingScreen />;
   }
@@ -761,7 +1154,7 @@ export function TrainingCoachApp() {
                   id="week-start"
                   type="date"
                   value={weekStart}
-                  onChange={(event) => setWeekStart(event.target.value)}
+                  onChange={(event) => changeWeekStart(event.target.value)}
                 />
                 {activeView === "plan" ? (
                   <button
@@ -847,7 +1240,7 @@ export function TrainingCoachApp() {
                   setWorkoutsCount={setWorkoutsCount}
                   workoutsCount={workoutsCount}
                   onApplyRecommendation={applyCoachRecommendation}
-                  onGenerateRecommendation={generateCoachPlan}
+                  onGenerateRecommendation={generatePlanWithRecommendedGoals}
                 />
                 <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
                   <CalendarPanel
@@ -865,10 +1258,15 @@ export function TrainingCoachApp() {
                           : "empty-workout"
                       }
                       busy={busy}
+                      canSendToGarmin={canSendToGarmin}
+                      garminActivity={selectedGarminActivity}
                       workout={selectedWorkout}
+                      weekDates={weekDates}
                       onAccept={acceptWorkout}
                       onChangeStatus={changeStatus}
                       onExport={exportWorkout}
+                      onMoveWorkout={moveWorkout}
+                      onSendToGarmin={sendWorkoutToGarmin}
                       onPatch={patchWorkout}
                     />
                     <SummaryPanel
@@ -890,6 +1288,20 @@ export function TrainingCoachApp() {
                   onApplyRecommendation={applyCoachRecommendation}
                   onGenerateRecommendation={generateCoachPlan}
                 />
+                <GarminPanel
+                  busy={busy}
+                  garmin={garmin}
+                  onConnectMock={connectGarminMock}
+                  onDisconnect={disconnectGarmin}
+                  onExportWeek={sendWeekToGarmin}
+                  importEndDate={garminImportEnd}
+                  importStartDate={garminImportStart}
+                  onImportActivities={importGarminActivities}
+                  onRefreshPermissions={refreshGarminPermissions}
+                  onImportEndDateChange={changeGarminImportEnd}
+                  onImportStartDateChange={changeGarminImportStart}
+                  hasPlan={hasPlan}
+                />
                 <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
                   <CalendarPanel
                     groupedWorkouts={groupedWorkouts}
@@ -906,10 +1318,15 @@ export function TrainingCoachApp() {
                           : "empty-workout-review"
                       }
                       busy={busy}
+                      canSendToGarmin={canSendToGarmin}
+                      garminActivity={selectedGarminActivity}
                       workout={selectedWorkout}
+                      weekDates={weekDates}
                       onAccept={acceptWorkout}
                       onChangeStatus={changeStatus}
                       onExport={exportWorkout}
+                      onMoveWorkout={moveWorkout}
+                      onSendToGarmin={sendWorkoutToGarmin}
                       onPatch={patchWorkout}
                     />
                     <SummaryPanel
@@ -999,6 +1416,11 @@ function AuthScreen(props: {
           </h1>
           <p className="mt-2 text-sm text-[#5f6368]">
             Dane treningowe są przypisane do zalogowanego użytkownika.
+          </p>
+          <p className="mt-3 rounded-md bg-[#edf7f6] px-3 py-2 text-xs leading-5 text-[#315955]">
+            {props.authMode === "login"
+              ? "Konto demo jest wpisane automatycznie: runner@example.com / runner123."
+              : "Zmień email, aby utworzyć nowe konto. Hasło musi mieć co najmniej 8 znaków."}
           </p>
           <label className="mt-5 block text-sm font-medium" htmlFor="email">
             Email
@@ -1375,23 +1797,26 @@ function ZonesPanel(props: {
       description="Utrzymuj osobno progi tempa i tętna używane w treningach."
       icon={Activity}
     >
-      <div className="grid gap-5 lg:grid-cols-2">
+      <div className="grid gap-5 2xl:grid-cols-2">
         {(["PACE", "HEART_RATE"] as const).map((type) => (
-          <fieldset className="rounded-xl border border-[#e2e8eb] p-3" key={type}>
+          <fieldset className="min-w-0 rounded-xl border border-[#e2e8eb] p-3" key={type}>
             <legend className="px-2 text-sm font-semibold">
               {type === "PACE" ? "Tempo" : "Tętno"}
+              <span className="ml-1 text-xs font-normal text-[#5f6368]">
+                ({type === "PACE" ? "min/km" : "bpm"})
+              </span>
             </legend>
-            <div className="mb-2 grid grid-cols-[42px_1fr_1fr_52px] gap-2 px-1 text-xs text-[#5f6368]">
+            <div className="mb-2 grid grid-cols-[44px_minmax(0,1fr)_minmax(0,1fr)] gap-2 px-1 text-xs text-[#5f6368] sm:grid-cols-[52px_minmax(96px,1fr)_minmax(96px,1fr)_72px]">
               <span>Strefa</span>
               <span>Od</span>
               <span>Do</span>
-              <span>Jedn.</span>
+              <span className="hidden sm:block">Jedn.</span>
             </div>
             <div className="space-y-2">
               {props.zones.map((zone, index) =>
                 zone.type !== type ? null : (
                   <div
-                    className="grid grid-cols-[42px_1fr_1fr_52px] gap-2 text-sm"
+                    className="grid grid-cols-[44px_minmax(0,1fr)_minmax(0,1fr)] gap-2 text-sm sm:grid-cols-[52px_minmax(96px,1fr)_minmax(96px,1fr)_72px]"
                     key={`${zone.type}-${zone.name}-${index}`}
                   >
                     <span className="rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs font-semibold text-[#5f6368]">
@@ -1406,7 +1831,7 @@ function ZonesPanel(props: {
                     ) : (
                       <input
                         aria-label={`Tętno ${zone.name} od`}
-                        className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2"
+                        className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
                         step="1"
                         type="number"
                         value={zone.minValue}
@@ -1424,7 +1849,7 @@ function ZonesPanel(props: {
                     ) : (
                       <input
                         aria-label={`Tętno ${zone.name} do`}
-                        className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2"
+                        className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
                         step="1"
                         type="number"
                         value={zone.maxValue}
@@ -1433,7 +1858,7 @@ function ZonesPanel(props: {
                         }
                       />
                     )}
-                    <span className="rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs text-[#5f6368]">
+                    <span className="hidden rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs text-[#5f6368] sm:block">
                       {zone.unit}
                     </span>
                   </div>
@@ -1466,7 +1891,7 @@ function PaceInput(props: {
   return (
     <input
       aria-label={props.ariaLabel}
-      className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 font-mono tabular-nums"
+      className="focus-ring w-full min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 font-mono tabular-nums"
       defaultValue={formattedValue}
       inputMode="numeric"
       key={`${props.ariaLabel}-${formattedValue}`}
@@ -1529,7 +1954,11 @@ function WizardPanel(props: {
               <Metric label="Minuty" value={`${recommendation.weeklyMinutesTarget}`} />
             </div>
           </div>
-          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <p className="mt-4 text-xs leading-5 text-[#456461]">
+            Wstaw rekomendację do pól, jeśli chcesz ją sprawdzić. Główna akcja wygeneruje
+            tydzień od razu z tym limitem.
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
             <button
               className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
               disabled={props.busy}
@@ -1537,7 +1966,7 @@ function WizardPanel(props: {
               onClick={props.onApplyRecommendation}
             >
               <Check size={16} />
-              Użyj rekomendacji
+              Wstaw do pól
             </button>
             <button
               className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white"
@@ -1546,7 +1975,7 @@ function WizardPanel(props: {
               onClick={props.onGenerateRecommendation}
             >
               <Wand2 size={16} />
-              Generuj optymalny plan
+              Generuj z rekomendacji
             </button>
           </div>
         </div>
@@ -1690,6 +2119,15 @@ function CalendarPanel(props: {
                       <span>{workout.zoneName}</span>
                       <span>·</span>
                       <span>{workout.goal}</span>
+                      {workout.segments?.[0] ? (
+                        <>
+                          <span>Â·</span>
+                          <span>
+                            {formatPaceRange(workout.segments[0])} /{" "}
+                            {formatHeartRateRange(workout.segments[0])}
+                          </span>
+                        </>
+                      ) : null}
                     </div>
                     <p className="mt-2 line-clamp-2 text-xs leading-5 text-[#3c4043] 2xl:line-clamp-3">
                       {workout.structure}
@@ -1862,6 +2300,306 @@ function CoachPanel(props: {
   );
 }
 
+function formatDistanceMeters(value: number | null) {
+  if (value === null) return "-";
+  return `${(value / 1000).toFixed(2)} km`;
+}
+
+function formatDurationShort(totalSeconds: number) {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.round((totalSeconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function formatGarminActivityDate(activity: GarminActivity) {
+  return activity.localDate ?? normalizeDate(activity.startTime);
+}
+
+function GarminPanel(props: {
+  busy: boolean;
+  garmin: GarminDashboard;
+  hasPlan: boolean;
+  importEndDate: string;
+  importStartDate: string;
+  onConnectMock: () => void;
+  onDisconnect: () => void;
+  onExportWeek: () => void;
+  onImportEndDateChange: (value: string) => void;
+  onImportActivities: () => void;
+  onImportStartDateChange: (value: string) => void;
+  onRefreshPermissions: () => void;
+}) {
+  const connected = props.garmin.connection.connected;
+  const isMock = props.garmin.connection.mode === "mock";
+  const importRangeDays = getISODateRangeDays(props.importStartDate, props.importEndDate);
+  const importRangeInvalid =
+    importRangeDays <= 0 || importRangeDays > GARMIN_MAX_IMPORT_RANGE_DAYS;
+  const importMaxEndDate = getGarminImportMaxEndDate(props.importStartDate);
+  const permissionsLabel = !connected
+    ? "-"
+    : props.garmin.connection.permissionsKnown
+      ? props.garmin.connection.missingPermissions.length === 0
+        ? "OK"
+        : "Brak"
+      : "Nieznane";
+  const configLabel = props.garmin.config.missing.length === 0 ? "OK" : "Brak";
+  const lastSync = props.garmin.connection.lastSyncAt
+    ? normalizeDate(props.garmin.connection.lastSyncAt)
+    : "-";
+  const oauthDisabledReason = props.garmin.config.oauthReady
+    ? null
+    : "OAuth wymaga konfiguracji Garmin w środowisku.";
+  const importDisabledReason = props.busy
+    ? "Poczekaj na zakończenie bieżącej operacji."
+    : !connected
+      ? "Połącz Garmin, aby importować aktywności."
+      : !props.garmin.connection.canImportActivities
+        ? "Brakuje zgody na import aktywności."
+        : !(isMock || props.garmin.config.activityPullReady)
+          ? "Import produkcyjny wymaga konfiguracji endpointu."
+          : importRangeInvalid
+            ? `Zakres importu musi mieć od 1 do ${GARMIN_MAX_IMPORT_RANGE_DAYS} dni.`
+            : null;
+  const exportWeekDisabledReason = props.busy
+    ? "Poczekaj na zakończenie bieżącej operacji."
+    : !props.hasPlan
+      ? "Najpierw wygeneruj plan tygodnia."
+      : !connected
+        ? "Połącz Garmin, aby wysłać tydzień."
+        : !props.garmin.connection.canExportWorkouts
+          ? "Brakuje zgody na wysyłkę treningów."
+          : !(isMock || props.garmin.config.trainingPushReady)
+            ? "Eksport produkcyjny wymaga konfiguracji endpointu."
+            : null;
+  const garminActionNotes = [
+    oauthDisabledReason ? `OAuth Garmin: ${oauthDisabledReason}` : null,
+    importDisabledReason ? `Import: ${importDisabledReason}` : null,
+    exportWeekDisabledReason ? `Wysyłka tygodnia: ${exportWeekDisabledReason}` : null
+  ].filter((note): note is string => Boolean(note));
+
+  return (
+    <Panel
+      title="Garmin Connect"
+      description="Import wykonanych aktywnosci zawodnika i publikacja zaplanowanych jednostek do kalendarza Garmin."
+      icon={Activity}
+    >
+      <div className="grid gap-2 sm:grid-cols-5">
+        <Metric
+          label="Status"
+          value={connected ? props.garmin.connection.mode ?? "OAuth" : "Brak"}
+        />
+        <Metric label="Zgody" value={permissionsLabel} />
+        <Metric label="Konfig" value={configLabel} />
+        <Metric label="Aktywnosci" value={props.garmin.activities.length} />
+        <Metric label="Ostatni sync" value={lastSync} />
+      </div>
+
+      {connected && props.garmin.connection.permissionsKnown && props.garmin.connection.missingPermissions.length > 0 ? (
+        <div className="mt-3 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
+          Brak zgód Garmin: {props.garmin.connection.missingPermissions.join(", ")}.
+        </div>
+      ) : null}
+      {connected && !props.garmin.connection.permissionsKnown ? (
+        <div className="mt-3 rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 text-sm text-[#5f6368]">
+          Nie potwierdzono jeszcze zgód Garmin dla tego połączenia.
+        </div>
+      ) : null}
+
+      {connected && isMock ? (
+        <div className="mt-3 rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3 text-sm text-[#315955]">
+          Garmin działa w trybie mock. Import i wysyłka są dostępne testowo dla tego konta.
+        </div>
+      ) : null}
+
+      <details className="mt-3 rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 text-sm">
+        <summary className="cursor-pointer font-semibold text-[#123130]">
+          Konfiguracja techniczna
+        </summary>
+        {props.garmin.config.missing.length > 0 ? (
+          <div className="mt-3 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
+            Brak konfiguracji produkcyjnej: {props.garmin.config.missing.join(", ")}.
+          </div>
+        ) : null}
+        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+          <div>
+            <div className="text-xs font-semibold uppercase text-[#5f6368]">Redirect URI</div>
+            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
+              {props.garmin.config.redirectUri}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase text-[#5f6368]">Zgody API</div>
+            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
+              {props.garmin.config.requiredPermissions.join(" ") || "-"}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase text-[#5f6368]">Activities webhook</div>
+            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
+              {props.garmin.config.webhookUrls.activities}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase text-[#5f6368]">Permissions webhook</div>
+            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
+              {props.garmin.config.webhookUrls.permissions}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase text-[#5f6368]">Deregistration webhook</div>
+            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
+              {props.garmin.config.webhookUrls.deregistration}
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <label className="text-sm font-medium">
+          Import od
+          <input
+            className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+            type="date"
+            value={props.importStartDate}
+            max={props.importEndDate}
+            onChange={(event) => props.onImportStartDateChange(event.target.value)}
+          />
+        </label>
+        <label className="text-sm font-medium">
+          Import do
+          <input
+            className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+            type="date"
+            value={props.importEndDate}
+            min={props.importStartDate}
+            max={importMaxEndDate}
+            onChange={(event) => props.onImportEndDateChange(event.target.value)}
+          />
+        </label>
+      </div>
+      {importRangeInvalid ? (
+        <div className="mt-3 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
+          Zakres importu Garmin musi mieć od 1 do {GARMIN_MAX_IMPORT_RANGE_DAYS} dni.
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+        <button
+          className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
+          disabled={props.busy}
+          type="button"
+          onClick={props.onConnectMock}
+        >
+          <Link2 size={16} />
+          Połącz mock
+        </button>
+        <a
+          aria-disabled={Boolean(oauthDisabledReason)}
+          className={clsx(
+            "focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-4 py-2.5 text-sm font-semibold",
+            !oauthDisabledReason
+              ? "text-[#3c4043]"
+              : "pointer-events-none text-[#9aa0a6]"
+          )}
+          href={!oauthDisabledReason ? "/api/garmin/oauth/start" : undefined}
+        >
+          <Link2 size={16} />
+          OAuth Garmin
+        </a>
+        <button
+          className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white"
+          disabled={Boolean(importDisabledReason)}
+          type="button"
+          onClick={props.onImportActivities}
+        >
+          <RefreshCw size={16} />
+          Importuj tydzień
+        </button>
+        <button
+          className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-4 py-2.5 text-sm font-semibold text-[#3c4043]"
+          disabled={props.busy || !connected}
+          type="button"
+          onClick={props.onRefreshPermissions}
+        >
+          <ShieldCheck size={16} />
+          Zgody
+        </button>
+        <button
+          className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#123130] px-4 py-2.5 text-sm font-semibold text-white"
+          disabled={Boolean(exportWeekDisabledReason)}
+          type="button"
+          onClick={props.onExportWeek}
+        >
+          <UploadCloud size={16} />
+          Wyślij tydzień
+        </button>
+        <button
+          className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] bg-white px-4 py-2.5 text-sm font-semibold text-[#3c4043]"
+          disabled={props.busy || !connected}
+          type="button"
+          onClick={props.onDisconnect}
+        >
+          <LogOut size={16} />
+          Rozłącz
+        </button>
+      </div>
+      {garminActionNotes.length > 0 ? (
+        <div className="mt-3 rounded-lg bg-[#f8fafb] p-3 text-xs leading-5 text-[#5f6368]">
+          <div className="font-semibold text-[#3c4043]">Dlaczego część akcji jest niedostępna?</div>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            {garminActionNotes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-2 lg:grid-cols-2">
+        {props.garmin.activities.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[#d9dee3] bg-[#f8fafb] p-4 text-sm text-[#5f6368]">
+            Brak zaimportowanych aktywnosci Garmin dla tego zawodnika.
+          </div>
+        ) : null}
+        {props.garmin.activities.map((activity) => (
+          <div
+            className="rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-3"
+            key={activity.id}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold">{activity.title}</div>
+                <div className="mt-1 text-xs text-[#5f6368]">
+                  {formatGarminActivityDate(activity)} - {activity.sport}
+                </div>
+                {activity.workoutTitle ? (
+                  <div className="mt-1 text-xs font-medium text-[#007f7a]">
+                    Plan: {activity.workoutTitle}
+                  </div>
+                ) : null}
+              </div>
+              <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
+                {formatDistanceMeters(activity.distanceMeters)}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <Metric label="Czas" value={formatDurationShort(activity.durationSeconds)} />
+              <Metric
+                label="Tempo"
+                value={
+                  activity.avgPaceSecondsPerKm
+                    ? `${formatPaceSeconds(activity.avgPaceSecondsPerKm)}/km`
+                    : "-"
+                }
+              />
+              <Metric label="HR" value={activity.avgHeartRate ?? "-"} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
 function SummaryPanel(props: {
   goals: GoalAllocation;
   plan: TrainingPlan | null;
@@ -1926,13 +2664,28 @@ function Metric({ label, value }: { label: string; value: string | number }) {
 
 function WorkoutEditor(props: {
   busy: boolean;
+  canSendToGarmin: boolean;
+  garminActivity: GarminActivity | null;
   workout: Workout | null;
+  weekDates: string[];
   onAccept: (id: string) => void;
   onChangeStatus: (id: string, status: WorkoutStatus) => void;
   onExport: (id: string) => void;
+  onMoveWorkout: (workoutId: string, date: string) => void;
+  onSendToGarmin: (id: string) => void;
   onPatch: (id: string, payload: Partial<Workout>) => Promise<Workout>;
 }) {
   const [draft, setDraft] = useState<Workout | null>(props.workout);
+  const garminExportDisabledReason = !draft
+    ? null
+    : props.busy
+      ? "Poczekaj na zakończenie bieżącej operacji."
+      : !props.canSendToGarmin
+        ? "Połącz Garmin i upewnij się, że eksport treningów jest dostępny."
+        : draft.status === "DONE" || draft.status === "SKIPPED"
+          ? "Garmin przyjmuje tylko treningi zaplanowane lub zaakceptowane."
+          : null;
+  const garminExportDisabled = Boolean(garminExportDisabledReason);
 
   if (!draft) {
     return (
@@ -1948,6 +2701,21 @@ function WorkoutEditor(props: {
       </Panel>
     );
   }
+
+  const segments = draft.segments ?? [];
+  const selectedWorkoutDate = normalizeDate(draft.date);
+  const updateDraftSegment = (index: number, patch: Partial<WorkoutSegment>) => {
+    setDraft({
+      ...draft,
+      segments: segments.map((segment, segmentIndex) =>
+        segmentIndex === index ? { ...segment, ...patch } : segment
+      )
+    });
+  };
+  const moveSelectedWorkout = (nextDate: string) => {
+    setDraft({ ...draft, date: nextDate });
+    props.onMoveWorkout(draft.id, nextDate);
+  };
 
   return (
     <Panel
@@ -1975,6 +2743,33 @@ function WorkoutEditor(props: {
           {statusLabels[draft.status]}
         </span>
       </div>
+      {props.garminActivity ? (
+        <div className="mb-4 rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="text-sm font-semibold text-[#123130]">Garmin wykonanie</div>
+              <div className="mt-1 text-xs text-[#456461]">
+                {formatGarminActivityDate(props.garminActivity)} - {props.garminActivity.title}
+              </div>
+            </div>
+            <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
+              {formatDistanceMeters(props.garminActivity.distanceMeters)}
+            </span>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <Metric label="Czas" value={formatDurationShort(props.garminActivity.durationSeconds)} />
+            <Metric
+              label="Tempo"
+              value={
+                props.garminActivity.avgPaceSecondsPerKm
+                  ? `${formatPaceSeconds(props.garminActivity.avgPaceSecondsPerKm)}/km`
+                  : "-"
+              }
+            />
+            <Metric label="HR" value={props.garminActivity.avgHeartRate ?? "-"} />
+          </div>
+        </div>
+      ) : null}
       <div className="grid gap-3">
         <label className="text-sm font-medium">
           Nazwa
@@ -2005,6 +2800,21 @@ function WorkoutEditor(props: {
             />
           </label>
         </div>
+        <label className="text-sm font-medium">
+          Przenieś na dzień
+          <select
+            className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+            disabled={props.busy}
+            value={selectedWorkoutDate}
+            onChange={(event) => moveSelectedWorkout(event.currentTarget.value)}
+          >
+            {props.weekDates.map((date, index) => (
+              <option key={date} value={date}>
+                {dayLabels[index]} {date.slice(5)}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="grid grid-cols-2 gap-2">
           <label className="text-sm font-medium">
             Cel
@@ -2039,47 +2849,197 @@ function WorkoutEditor(props: {
             onChange={(event) => setDraft({ ...draft, structure: event.target.value })}
           />
         </label>
-        <button
-          className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
-          disabled={props.busy}
-          type="button"
-          onClick={() => void props.onPatch(draft.id, draft)}
-        >
-          <Save size={16} />
-          Zapisz zmiany
-        </button>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold">Segmenty tempa i tetna</div>
+              <div className="mt-1 text-xs text-[#5f6368]">
+                Segmenty sa zrodlem prawdy dla zakresow min/km i bpm.
+              </div>
+            </div>
+            <span className="shrink-0 rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
+              {segments.reduce((sum, segment) => sum + segment.durationMin, 0)} min
+            </span>
+          </div>
+          {segments.length === 0 ? (
+            <div className="mt-3 rounded-md border border-dashed border-[#c7cdd2] bg-white p-3 text-sm text-[#5f6368]">
+              Ten trening nie ma jeszcze segmentow. Eksporty uzyja opisu tekstowego.
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {segments.map((segment, index) => (
+                <div
+                  className="grid gap-2 rounded-md border border-[#e2e8eb] bg-white p-3 md:grid-cols-[1.2fr_80px_80px_1fr_1fr_1fr]"
+                  key={segment.id ?? `${segment.label}-${index}`}
+                >
+                  <label className="text-xs font-medium text-[#5f6368]">
+                    Segment
+                    <input
+                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
+                      value={segment.label}
+                      onChange={(event) =>
+                        updateDraftSegment(index, { label: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-[#5f6368]">
+                    Min
+                    <input
+                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
+                      min={1}
+                      type="number"
+                      value={segment.durationMin}
+                      onChange={(event) =>
+                        updateDraftSegment(index, { durationMin: Number(event.target.value) })
+                      }
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-[#5f6368]">
+                    Strefa
+                    <input
+                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
+                      value={segment.zoneName}
+                      onChange={(event) =>
+                        updateDraftSegment(index, { zoneName: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-[#5f6368]">
+                    Tempo min/max
+                    <div className="mt-1 grid grid-cols-2 gap-1">
+                      <PaceInput
+                        ariaLabel={`Tempo minimalne segmentu ${index + 1}`}
+                        value={segment.paceMinSecPerKm}
+                        onChange={(value) =>
+                          updateDraftSegment(index, { paceMinSecPerKm: value })
+                        }
+                      />
+                      <PaceInput
+                        ariaLabel={`Tempo maksymalne segmentu ${index + 1}`}
+                        value={segment.paceMaxSecPerKm}
+                        onChange={(value) =>
+                          updateDraftSegment(index, { paceMaxSecPerKm: value })
+                        }
+                      />
+                    </div>
+                    <span className="mt-1 block text-[11px]">{formatPaceRange(segment)}</span>
+                  </label>
+                  <label className="text-xs font-medium text-[#5f6368]">
+                    HR min/max
+                    <div className="mt-1 grid grid-cols-2 gap-1">
+                      <input
+                        className="focus-ring w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
+                        min={1}
+                        type="number"
+                        value={segment.heartRateMinBpm}
+                        onChange={(event) =>
+                          updateDraftSegment(index, {
+                            heartRateMinBpm: Number(event.target.value)
+                          })
+                        }
+                      />
+                      <input
+                        className="focus-ring w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
+                        min={1}
+                        type="number"
+                        value={segment.heartRateMaxBpm}
+                        onChange={(event) =>
+                          updateDraftSegment(index, {
+                            heartRateMaxBpm: Number(event.target.value)
+                          })
+                        }
+                      />
+                    </div>
+                    <span className="mt-1 block text-[11px]">
+                      {formatHeartRateRange(segment)}
+                    </span>
+                  </label>
+                  <label className="text-xs font-medium text-[#5f6368]">
+                    Intensywnosc
+                    <input
+                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
+                      value={segment.intensity}
+                      onChange={(event) =>
+                        updateDraftSegment(index, { intensity: event.target.value })
+                      }
+                    />
+                  </label>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="border-t border-[#e2e8eb] pt-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
+            Edycja
+          </div>
           <button
-            className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-3 py-2.5 text-sm font-semibold text-white"
+            className="focus-ring flex w-full items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
             disabled={props.busy}
             type="button"
-            onClick={() => void props.onAccept(draft.id)}
+            onClick={() => void props.onPatch(draft.id, draft)}
           >
-            <Check size={16} />
-            Akceptuj
-          </button>
-          <button
-            className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
-            disabled={props.busy}
-            type="button"
-            onClick={() => void props.onExport(draft.id)}
-          >
-            <Download size={16} />
-            Eksport TP
+            <Save size={16} />
+            Zapisz zmiany
           </button>
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          {(["DONE", "SKIPPED"] as WorkoutStatus[]).map((status) => (
+        <div className="border-t border-[#e2e8eb] pt-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
+            Decyzja treningowa
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
             <button
-              className="focus-ring rounded-lg bg-[#f8fafb] px-3 py-2.5 text-sm font-semibold text-[#3c4043]"
+              className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-3 py-2.5 text-sm font-semibold text-white"
               disabled={props.busy}
-              key={status}
               type="button"
-              onClick={() => void props.onChangeStatus(draft.id, status)}
+              onClick={() => void props.onAccept(draft.id)}
             >
-              {status === "DONE" ? "Oznacz wykonany" : "Oznacz pominięty"}
+              <Check size={16} />
+              Akceptuj
             </button>
-          ))}
+            {(["DONE", "SKIPPED"] as WorkoutStatus[]).map((status) => (
+              <button
+                className="focus-ring rounded-lg bg-[#f8fafb] px-3 py-2.5 text-sm font-semibold text-[#3c4043]"
+                disabled={props.busy}
+                key={status}
+                type="button"
+                onClick={() => void props.onChangeStatus(draft.id, status)}
+              >
+                {status === "DONE" ? "Oznacz wykonany" : "Oznacz pominięty"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="border-t border-[#e2e8eb] pt-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
+            Eksport
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button
+              className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
+              disabled={props.busy}
+              type="button"
+              onClick={() => void props.onExport(draft.id)}
+            >
+              <Download size={16} />
+              TrainingPeaks
+            </button>
+            <button
+              aria-describedby={garminExportDisabledReason ? "garmin-workout-disabled" : undefined}
+              className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
+              disabled={garminExportDisabled}
+              type="button"
+              onClick={() => void props.onSendToGarmin(draft.id)}
+            >
+              <UploadCloud size={16} />
+              Garmin
+            </button>
+          </div>
+          {garminExportDisabledReason ? (
+            <p id="garmin-workout-disabled" className="mt-2 text-xs leading-5 text-[#5f6368]">
+              Garmin: {garminExportDisabledReason}
+            </p>
+          ) : null}
         </div>
       </div>
     </Panel>

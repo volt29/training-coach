@@ -95,13 +95,17 @@ export function buildGenerationPrompt(
 
 Zasady twarde:
 - Zwróć wyłącznie JSON, bez markdown.
-- Format: {"workouts":[{"date":"YYYY-MM-DD","sport":"run","goal":"easy|tempo|intervals|longRun|recovery","title":"...","durationMin":45,"zoneName":"Z2","intensity":"niska","structure":"...","notes":"..."}]}
+- Format: {"workouts":[{"date":"YYYY-MM-DD","sport":"run","goal":"easy|tempo|intervals|longRun|recovery","title":"...","durationMin":45,"zoneName":"Z2","intensity":"niska","structure":"...","notes":"...","segments":[{"label":"Rozgrzewka","durationMin":10,"zoneName":"Z1","paceMinSecPerKm":390,"paceMaxSecPerKm":480,"heartRateMinBpm":115,"heartRateMaxBpm":137,"intensity":"niska","notes":"..."}]}]}
 - Liczba treningów: ${input.workoutsCount}.
 - Wszystkie daty muszą być w tygodniu zaczynającym się ${input.weekStart}.
 - Maksymalnie jeden trening dziennie.
 - Między treningami tempo, intervals i longRun musi być co najmniej jeden dzień bez mocnego bodźca.
 - Cele procentowo: easy ${input.goals.easy}%, tempo ${input.goals.tempo}%, intervals ${input.goals.intervals}%, longRun ${input.goals.longRun}%, recovery ${input.goals.recovery}%.
 - Strefy PACE mają minValue/maxValue jako sekundy na kilometr i unit "min/km"; w opisach tempa używaj formatu min:sek/km, nigdy m/s ani km/h.
+
+- Strefy HEART_RATE maja minValue/maxValue jako bpm; kazdy segment musi miec heartRateMinBpm/heartRateMaxBpm z zapisanych stref zawodnika.
+- Kazdy trening musi miec segments. Segmenty sa zrodlem prawdy dla tempa i tetna, a structure ma byc czytelnym streszczeniem segmentow.
+- Zakresy paceMinSecPerKm/paceMaxSecPerKm i heartRateMinBpm/heartRateMaxBpm nie moga wychodzic poza zapisane strefy zawodnika.
 
 Profil:
 ${JSON.stringify(context.profile ?? {}, null, 2)}

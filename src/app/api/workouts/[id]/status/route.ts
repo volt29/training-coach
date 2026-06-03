@@ -26,7 +26,12 @@ export async function PATCH(request: Request, { params }: Params) {
 
     const updatedWorkout = await prisma.workout.update({
       where: { id: workout.id },
-      data: { status: input.status }
+      data: { status: input.status },
+      include: {
+        segments: {
+          orderBy: { sortOrder: "asc" }
+        }
+      }
     });
 
     return Response.json({ workout: updatedWorkout });

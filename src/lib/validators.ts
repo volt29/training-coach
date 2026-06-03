@@ -109,6 +109,30 @@ export const workoutStatusSchema = z.object({
   status: z.enum(["PLANNED", "ACCEPTED", "DONE", "SKIPPED", "EXPORTED"])
 });
 
+export const generatedWorkoutSegmentSchema = z
+  .object({
+    label: z.string().min(1).max(80),
+    durationMin: z.coerce.number().int().min(1).max(300),
+    zoneName: z.string().min(1).max(40),
+    paceMinSecPerKm: z.coerce.number().int().positive().max(9999),
+    paceMaxSecPerKm: z.coerce.number().int().positive().max(9999),
+    heartRateMinBpm: z.coerce.number().int().positive().max(999),
+    heartRateMaxBpm: z.coerce.number().int().positive().max(999),
+    intensity: z.string().min(1).max(40),
+    notes: z.string().max(300).optional().nullable()
+  })
+  .refine((segment) => segment.paceMinSecPerKm < segment.paceMaxSecPerKm, {
+    message: "Dolny zakres tempa segmentu musi byc mniejszy niz gorny."
+  })
+  .refine((segment) => segment.heartRateMinBpm < segment.heartRateMaxBpm, {
+    message: "Dolny zakres tetna segmentu musi byc mniejszy niz gorny."
+  });
+
+export const workoutSegmentPatchSchema = generatedWorkoutSegmentSchema.extend({
+  id: z.string().optional(),
+  sortOrder: z.coerce.number().int().min(0).max(99).optional()
+});
+
 export const generatedWorkoutSchema = z.object({
   date: isoDateSchema,
   sport: z.literal("run"),
@@ -118,7 +142,12 @@ export const generatedWorkoutSchema = z.object({
   zoneName: z.string().min(1).max(40),
   intensity: z.string().min(1).max(40),
   structure: z.string().min(1).max(600),
-  notes: z.string().max(800).optional().nullable()
+  notes: z.string().max(800).optional().nullable(),
+  segments: z.array(generatedWorkoutSegmentSchema).min(1).max(80)
+});
+
+export const workoutPatchWithSegmentsSchema = workoutPatchSchema.extend({
+  segments: z.array(workoutSegmentPatchSchema).max(80).optional()
 });
 
 export const generatedPlanSchema = z.object({
@@ -127,9 +156,11 @@ export const generatedPlanSchema = z.object({
 
 export type GoalAllocation = z.infer<typeof goalAllocationSchema>;
 export type GeneratePlanInput = z.infer<typeof generatePlanInputSchema>;
+export type GeneratedWorkoutSegment = z.infer<typeof generatedWorkoutSegmentSchema>;
 export type GeneratedWorkout = z.infer<typeof generatedWorkoutSchema>;
 
 const HARD_GOALS = new Set(["tempo", "intervals", "longRun"]);
+const SEGMENT_DURATION_TOLERANCE_MINUTES = 5;
 
 function isHardWorkout(workout: GeneratedWorkout) {
   const normalized = workout.goal.trim();
@@ -184,6 +215,29 @@ export function validateGeneratedWorkouts(
         "Między ciężkimi jednostkami musi być minimum jeden dzień bez mocnego bodźca."
       );
     }
+  }
+
+  for (const workout of workouts) {
+    const segmentMinutes = workout.segments.reduce(
+      (sum, segment) => sum + segment.durationMin,
+      0
+    );
+
+    if (Math.abs(segmentMinutes - workout.durationMin) > SEGMENT_DURATION_TOLERANCE_MINUTES) {
+      throw new Error(
+        `Suma segmentow treningu ${workout.title} rozni sie od czasu treningu o wiecej niz ${SEGMENT_DURATION_TOLERANCE_MINUTES} min.`
+      );
+    }
+
+    workout.segments.forEach((segment, index) => {
+      if (segment.paceMinSecPerKm >= segment.paceMaxSecPerKm) {
+        throw new Error(`Segment ${index + 1} treningu ${workout.title} ma bledny zakres tempa.`);
+      }
+
+      if (segment.heartRateMinBpm >= segment.heartRateMaxBpm) {
+        throw new Error(`Segment ${index + 1} treningu ${workout.title} ma bledny zakres tetna.`);
+      }
+    });
   }
 
   return workouts;

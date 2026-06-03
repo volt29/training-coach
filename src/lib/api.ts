@@ -28,6 +28,13 @@ export function apiError(error: unknown) {
     return Response.json({ error: error.message }, { status: error.status });
   }
 
+  if (error instanceof Error && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number" && status >= 400 && status <= 599) {
+      return Response.json({ error: error.message }, { status });
+    }
+  }
+
   if (error instanceof Error) {
     return Response.json({ error: error.message }, { status: 500 });
   }

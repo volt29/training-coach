@@ -18,6 +18,11 @@ export async function POST(_request: Request, { params }: Params) {
       where: {
         id,
         userId: auth.userId
+      },
+      include: {
+        segments: {
+          orderBy: { sortOrder: "asc" }
+        }
       }
     });
 

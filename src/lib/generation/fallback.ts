@@ -1,5 +1,9 @@
 import { addDays, parseISODate, toISODate } from "@/lib/dates";
-import type { GeneratePlanInput, GeneratedWorkout } from "@/lib/validators";
+import type {
+  GeneratePlanInput,
+  GeneratedWorkout,
+  GeneratedWorkoutSegment
+} from "@/lib/validators";
 
 type AthleteLevel = "BEGINNER" | "INTERMEDIATE" | "ADVANCED";
 type GoalKey = keyof GeneratePlanInput["goals"];
@@ -16,6 +20,7 @@ type FallbackContext = {
     minValue: number;
     maxValue: number;
     unit: string;
+    sortOrder?: number;
   }>;
   raceResults?: Array<{
     distanceKm: number;
@@ -26,6 +31,17 @@ type FallbackContext = {
 type WorkoutSlot = {
   day: number;
   goal: GoalKey;
+};
+
+type ZoneType = "PACE" | "HEART_RATE";
+
+type SegmentTarget = {
+  zoneName: string;
+  paceMinSecPerKm: number;
+  paceMaxSecPerKm: number;
+  heartRateMinBpm: number;
+  heartRateMaxBpm: number;
+  intensity: string;
 };
 
 const GOAL_ZONE: Record<GoalKey, string> = {
@@ -87,10 +103,6 @@ function normalizeLevel(value: string | undefined): AthleteLevel {
   return value === "BEGINNER" || value === "ADVANCED" ? value : "INTERMEDIATE";
 }
 
-function findPaceZone(context: FallbackContext | undefined, zoneName: string) {
-  return context?.zones?.find((zone) => zone.type === "PACE" && zone.name === zoneName);
-}
-
 function formatPace(totalSeconds: number) {
   const rounded = Math.round(totalSeconds);
   const minutes = Math.floor(rounded / 60);
@@ -99,18 +111,93 @@ function formatPace(totalSeconds: number) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function zonePaceHint(context: FallbackContext | undefined, zoneName: string) {
-  const zone = findPaceZone(context, zoneName);
+function zoneOrdinal(zoneName: string) {
+  const match = zoneName.match(/\d+/);
+  return match ? Number(match[0]) - 1 : 0;
+}
 
-  if (!zone) {
-    return zoneName;
+function zonesByType(context: FallbackContext | undefined, type: ZoneType) {
+  return (context?.zones ?? [])
+    .filter((zone) => zone.type === type)
+    .sort((left, right) => {
+      const leftOrder = left.sortOrder ?? zoneOrdinal(left.name);
+      const rightOrder = right.sortOrder ?? zoneOrdinal(right.name);
+      return leftOrder - rightOrder;
+    });
+}
+
+function fallbackZone(type: ZoneType, zoneName: string) {
+  const index = clamp(zoneOrdinal(zoneName), 0, 4);
+  const paceDefaults = [
+    { minValue: 390, maxValue: 480 },
+    { minValue: 330, maxValue: 389 },
+    { minValue: 290, maxValue: 329 },
+    { minValue: 255, maxValue: 289 },
+    { minValue: 220, maxValue: 254 }
+  ];
+  const heartRateDefaults = [
+    { minValue: 115, maxValue: 137 },
+    { minValue: 138, maxValue: 151 },
+    { minValue: 152, maxValue: 165 },
+    { minValue: 166, maxValue: 178 },
+    { minValue: 179, maxValue: 194 }
+  ];
+
+  return {
+    name: zoneName,
+    ...(type === "PACE" ? paceDefaults[index] : heartRateDefaults[index])
+  };
+}
+
+function resolveZone(
+  context: FallbackContext | undefined,
+  type: ZoneType,
+  zoneName: string
+) {
+  const zones = zonesByType(context, type);
+  const exactZone = zones.find((zone) => zone.name.toLowerCase() === zoneName.toLowerCase());
+
+  if (exactZone) {
+    return exactZone;
   }
 
-  return `${zoneName} (${formatPace(zone.minValue)}-${formatPace(zone.maxValue)} min/km)`;
+  const ordinalZone = zones[clamp(zoneOrdinal(zoneName), 0, zones.length - 1)];
+  return ordinalZone ?? fallbackZone(type, zoneName);
+}
+
+function segmentTarget(
+  context: FallbackContext | undefined,
+  zoneName: string,
+  intensity: string
+): SegmentTarget {
+  const paceZone = resolveZone(context, "PACE", zoneName);
+  const heartRateZone = resolveZone(context, "HEART_RATE", zoneName);
+
+  return {
+    zoneName: paceZone.name,
+    paceMinSecPerKm: Math.round(paceZone.minValue),
+    paceMaxSecPerKm: Math.round(paceZone.maxValue),
+    heartRateMinBpm: Math.round(heartRateZone.minValue),
+    heartRateMaxBpm: Math.round(heartRateZone.maxValue),
+    intensity
+  };
+}
+
+function formatTarget(segment: GeneratedWorkoutSegment) {
+  return `${segment.zoneName} (${formatPace(segment.paceMinSecPerKm)}-${formatPace(
+    segment.paceMaxSecPerKm
+  )} min/km, HR ${segment.heartRateMinBpm}-${segment.heartRateMaxBpm} bpm)`;
+}
+
+function zonePaceHint(context: FallbackContext | undefined, zoneName: string) {
+  const target = segmentTarget(context, zoneName, "niska");
+  return `${target.zoneName} (${formatPace(target.paceMinSecPerKm)}-${formatPace(
+    target.paceMaxSecPerKm
+  )} min/km)`;
 }
 
 function easyPaceMinutes(context: FallbackContext | undefined) {
-  const z2 = findPaceZone(context, "Z2");
+  const z2 = resolveZone(context, "PACE", "Z2");
 
   if (z2) {
     return (z2.minValue + z2.maxValue) / 2 / 60;
@@ -273,6 +360,118 @@ function structureForGoal(goal: GoalKey, durationMin: number, context: FallbackC
   return `${Math.max(45, durationMin - 15)} min spokojnie w ${paceHint} + 10 min lekko narastająco + 5 min schłodzenia.`;
 }
 
+function createSegment(
+  context: FallbackContext | undefined,
+  label: string,
+  durationMin: number,
+  zoneName: string,
+  intensity: string,
+  notes?: string
+): GeneratedWorkoutSegment {
+  return {
+    label,
+    durationMin,
+    ...segmentTarget(context, zoneName, intensity),
+    notes: notes ?? null
+  };
+}
+
+function segmentsForGoal(
+  goal: GoalKey,
+  durationMin: number,
+  context: FallbackContext | undefined
+): GeneratedWorkoutSegment[] {
+  if (goal === "recovery") {
+    return [
+      createSegment(
+        context,
+        "Regeneracja",
+        durationMin,
+        "Z1",
+        GOAL_INTENSITY.recovery,
+        "Bardzo swobodnie, bez kontroli tempa i bez akcentow."
+      )
+    ];
+  }
+
+  if (goal === "easy") {
+    const warmup = 10;
+    const cooldown = 5;
+    return [
+      createSegment(context, "Wejscie", warmup, "Z1", "bardzo niska"),
+      createSegment(
+        context,
+        "Bieg swobodny",
+        Math.max(1, durationMin - warmup - cooldown),
+        "Z2",
+        GOAL_INTENSITY.easy
+      ),
+      createSegment(context, "Schlodzenie", cooldown, "Z1", "bardzo niska")
+    ];
+  }
+
+  if (goal === "intervals") {
+    const warmup = 15;
+    const reps = clamp(Math.floor((durationMin - 25) / 4), 4, 8);
+    const cooldown = Math.max(5, durationMin - warmup - reps * 4);
+    const segments: GeneratedWorkoutSegment[] = [
+      createSegment(context, "Rozgrzewka", warmup, "Z1", "niska")
+    ];
+
+    for (let index = 1; index <= reps; index += 1) {
+      segments.push(
+        createSegment(context, `Powtorzenie ${index}`, 2, "Z4", GOAL_INTENSITY.intervals),
+        createSegment(context, `Przerwa ${index}`, 2, "Z1", "bardzo niska", "Trucht.")
+      );
+    }
+
+    segments.push(createSegment(context, "Schlodzenie", cooldown, "Z1", "niska"));
+    return segments;
+  }
+
+  if (goal === "tempo") {
+    const warmup = 15;
+    const reps = durationMin >= 65 ? 3 : 2;
+    const recoveryCount = reps - 1;
+    const cooldown = Math.max(5, durationMin - warmup - reps * 8 - recoveryCount * 3);
+    const segments: GeneratedWorkoutSegment[] = [
+      createSegment(context, "Rozgrzewka", warmup, "Z1", "niska")
+    ];
+
+    for (let index = 1; index <= reps; index += 1) {
+      segments.push(createSegment(context, `Tempo ${index}`, 8, "Z3", GOAL_INTENSITY.tempo));
+      if (index < reps) {
+        segments.push(createSegment(context, `Trucht ${index}`, 3, "Z1", "bardzo niska"));
+      }
+    }
+
+    segments.push(createSegment(context, "Schlodzenie", cooldown, "Z1", "niska"));
+    return segments;
+  }
+
+  const warmup = 10;
+  const finish = 10;
+  const cooldown = 5;
+  return [
+    createSegment(context, "Wejscie", warmup, "Z1", "niska"),
+    createSegment(
+      context,
+      "Dlugie Z2",
+      Math.max(1, durationMin - warmup - finish - cooldown),
+      "Z2",
+      GOAL_INTENSITY.longRun
+    ),
+    createSegment(context, "Narastajaco", finish, "Z2", "umiarkowana"),
+    createSegment(context, "Schlodzenie", cooldown, "Z1", "niska")
+  ];
+}
+
+function structureFromSegments(segments: GeneratedWorkoutSegment[]) {
+  return segments
+    .map((segment) => `${segment.label}: ${segment.durationMin} min ${formatTarget(segment)}`)
+    .join(" + ");
+}
+
 export function createFallbackWorkouts(
   input: GeneratePlanInput,
   context?: FallbackContext
@@ -286,6 +485,7 @@ export function createFallbackWorkouts(
   return slots.map((slot) => {
     const occurrence = occurrences[slot.goal] ?? 0;
     const durationMin = durationForSlot(slot, targetMinutes, totalWeight);
+    const segments = segmentsForGoal(slot.goal, durationMin, context);
     occurrences[slot.goal] = occurrence + 1;
 
     return {
@@ -296,7 +496,8 @@ export function createFallbackWorkouts(
       durationMin,
       zoneName: GOAL_ZONE[slot.goal],
       intensity: GOAL_INTENSITY[slot.goal],
-      structure: structureForGoal(slot.goal, durationMin, context),
+      structure: structureFromSegments(segments),
+      segments,
       notes:
         "Plan regułowy dopasowany do profilu, stref, wyników i rekomendowanego rozkładu bodźców."
     };

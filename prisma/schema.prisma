@@ -32,24 +32,28 @@ enum PlanSource {
 }
 
 enum ExportStatus {
+  PENDING
   SUCCESS
   FAILED
 }
 
 model User {
-  id             String              @id @default(cuid())
-  email          String              @unique
-  passwordHash   String
-  name           String?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-  profile        AthleteProfile?
-  zones          IntensityZone[]
-  raceResults    RaceResult[]
-  plans          TrainingPlan[]
-  workouts       Workout[]
-  requests       GenerationRequest[]
-  exportAttempts ExportAttempt[]
+  id                String              @id @default(cuid())
+  email             String              @unique
+  passwordHash      String
+  name              String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  profile           AthleteProfile?
+  zones             IntensityZone[]
+  raceResults       RaceResult[]
+  plans             TrainingPlan[]
+  workouts          Workout[]
+  requests          GenerationRequest[]
+  exportAttempts    ExportAttempt[]
+  garminConnection  GarminConnection?
+  garminActivities  GarminActivity[]
+  garminOAuthStates GarminOAuthState[]
 }
 
 model AthleteProfile {
@@ -94,44 +98,64 @@ model RaceResult {
 }
 
 model TrainingPlan {
-  id          String              @id @default(cuid())
-  userId      String
-  weekStart   DateTime
-  source      PlanSource
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
-  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workouts    Workout[]
-  requests    GenerationRequest[]
+  id        String              @id @default(cuid())
+  userId    String
+  weekStart DateTime
+  source    PlanSource
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workouts  Workout[]
+  requests  GenerationRequest[]
 
   @@unique([userId, weekStart])
   @@index([userId, weekStart])
 }
 
 model Workout {
-  id             String          @id @default(cuid())
-  userId         String
-  planId         String
-  date           DateTime
-  dayIndex       Int
-  sport          String          @default("run")
-  goal           String
-  title          String
-  durationMin    Int
-  zoneName       String
-  intensity      String
-  structure      String
-  notes          String?
-  status         WorkoutStatus   @default(PLANNED)
-  sortOrder      Int             @default(0)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan           TrainingPlan    @relation(fields: [planId], references: [id], onDelete: Cascade)
-  exportAttempts ExportAttempt[]
+  id               String           @id @default(cuid())
+  userId           String
+  planId           String
+  date             DateTime
+  dayIndex         Int
+  sport            String           @default("run")
+  goal             String
+  title            String
+  durationMin      Int
+  zoneName         String
+  intensity        String
+  structure        String
+  notes            String?
+  status           WorkoutStatus    @default(PLANNED)
+  sortOrder        Int              @default(0)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan             TrainingPlan     @relation(fields: [planId], references: [id], onDelete: Cascade)
+  exportAttempts   ExportAttempt[]
+  garminActivities GarminActivity[]
+  segments         WorkoutSegment[]
 
   @@index([userId, date])
   @@index([planId, dayIndex])
+}
+
+model WorkoutSegment {
+  id                 String   @id @default(cuid())
+  workoutId          String
+  sortOrder          Int      @default(0)
+  label              String
+  durationMin        Int
+  zoneName           String
+  paceMinSecPerKm    Int
+  paceMaxSecPerKm    Int
+  heartRateMinBpm    Int
+  heartRateMaxBpm    Int
+  intensity          String
+  notes              String?
+  workout            Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+
+  @@index([workoutId, sortOrder])
 }
 
 model GenerationRequest {
@@ -159,10 +183,74 @@ model ExportAttempt {
   provider   String       @default("TrainingPeaks")
   status     ExportStatus
   externalId String?
+  dedupeKey  String?      @unique
   payload    String
   createdAt  DateTime     @default(now())
   user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   workout    Workout      @relation(fields: [workoutId], references: [id], onDelete: Cascade)
 
   @@index([userId, workoutId])
+}
+
+model GarminConnection {
+  id             String           @id @default(cuid())
+  userId         String           @unique
+  providerUserId String?
+  accessToken    String?
+  refreshToken   String?
+  tokenType      String?
+  expiresAt      DateTime?
+  scopes         String?
+  permissions    String?
+  mode           String           @default("mock")
+  connectedAt    DateTime         @default(now())
+  lastSyncAt     DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activities     GarminActivity[]
+}
+
+model GarminActivity {
+  id                    String            @id @default(cuid())
+  userId                String
+  connectionId          String?
+  workoutId             String?
+  externalId            String
+  startTime             DateTime
+  localDate             String?
+  sport                 String
+  title                 String
+  distanceMeters        Float?
+  durationSeconds       Int
+  movingDurationSeconds Int?
+  avgHeartRate          Int?
+  maxHeartRate          Int?
+  avgPaceSecondsPerKm   Int?
+  calories              Int?
+  trainingEffect        Float?
+  source                String            @default("GarminConnect")
+  rawPayload            String
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connection            GarminConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  workout               Workout?          @relation(fields: [workoutId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, externalId])
+  @@index([userId, startTime])
+  @@index([workoutId])
+}
+
+model GarminOAuthState {
+  id           String   @id @default(cuid())
+  userId       String
+  state        String   @unique
+  codeVerifier String?
+  redirectTo   String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
 }
