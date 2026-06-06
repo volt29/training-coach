@@ -6,25 +6,33 @@ import {
   Bot,
   CalendarDays,
   Check,
+  ChevronLeft,
   ChevronRight,
   Download,
   Dumbbell,
   Link2,
   LogOut,
-  Move,
   RefreshCw,
   Save,
   ShieldCheck,
+  SlidersHorizontal,
   Target,
-  TrendingDown,
+  Trash2,
   TrendingUp,
   UploadCloud,
   UserRound,
-  Wand2
+  Wand2,
+  X
 } from "lucide-react";
 import { signIn, signOut, useSession } from "next-auth/react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState
+} from "react";
 
 import { addDays, getMondayISO, getWeekDates, parseISODate, toISODate } from "@/lib/dates";
 
@@ -150,6 +158,7 @@ type TrainingPlan = {
   id: string;
   weekStart: string;
   source: "HUGGING_FACE" | "FALLBACK";
+  updatedAt: string;
   workouts: Workout[];
   requests?: Array<{
     validationErrors: string | null;
@@ -164,7 +173,7 @@ type GoalAllocation = {
   recovery: number;
 };
 
-type WorkspaceView = "setup" | "plan" | "review";
+type DrawerView = "profile" | "workout" | "garmin" | null;
 
 type LoadSummary = {
   plannedWorkouts: number;
@@ -281,12 +290,20 @@ const statusLabels: Record<WorkoutStatus, string> = {
   EXPORTED: "Wyeksportowany"
 };
 
+const statusTone: Record<WorkoutStatus, string> = {
+  PLANNED: "bg-[#edf7f6] text-[#007f7a]",
+  ACCEPTED: "bg-[#eef4ff] text-[#2f5b9f]",
+  DONE: "bg-[#eaf7ed] text-[#2f8d46]",
+  SKIPPED: "bg-[#fff4ef] text-[#c24135]",
+  EXPORTED: "bg-[#eaf7ed] text-[#2f8d46]"
+};
+
 const garminOAuthMessages: Record<string, string> = {
-  connected: "Garmin Connect polaczony.",
-  "oauth-error": "Garmin odrzucil autoryzacje.",
-  "missing-code": "Garmin nie zwrocil kodu autoryzacji.",
-  "invalid-state": "Sesja laczenia Garmin wygasla. Sprobuj ponownie.",
-  "token-error": "Nie udalo sie zakonczyc laczenia Garmin."
+  connected: "Garmin Connect połączony.",
+  "oauth-error": "Garmin odrzucił autoryzację.",
+  "missing-code": "Garmin nie zwrócił kodu autoryzacji.",
+  "invalid-state": "Sesja łączenia Garmin wygasła. Spróbuj ponownie.",
+  "token-error": "Nie udało się zakończyć łączenia Garmin."
 };
 
 const dayLabels = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Nd"];
@@ -324,7 +341,7 @@ function readGarminOAuthMessageFromLocation() {
   url.searchParams.delete("garmin");
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 
-  return garminOAuthMessages[result] ?? "Garmin Connect zwrocil nieznany status laczenia.";
+  return garminOAuthMessages[result] ?? "Garmin Connect zwrócił nieznany status łączenia.";
 }
 
 function secondsToTime(totalSeconds: number) {
@@ -383,6 +400,53 @@ function parsePaceSeconds(value: string) {
   return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes * 60) : null;
 }
 
+function formatDistanceMeters(value: number | null) {
+  if (value === null) return "-";
+  return `${(value / 1000).toFixed(2)} km`;
+}
+
+function formatDurationShort(totalSeconds: number) {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.round((totalSeconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function formatGarminActivityDate(activity: GarminActivity) {
+  return activity.localDate ?? normalizeDate(activity.startTime);
+}
+
+function formatPlanSource(plan: TrainingPlan | null) {
+  if (plan?.source === "HUGGING_FACE") return "Hugging Face";
+  if (plan?.source === "FALLBACK") return "Fallback regułowy";
+  return "Brak planu";
+}
+
+function formatWeekRange(weekDates: string[]) {
+  const start = parseISODate(weekDates[0]);
+  const end = parseISODate(weekDates[6]);
+  const startLabel = new Intl.DateTimeFormat("pl-PL", {
+    day: "2-digit",
+    month: "2-digit"
+  }).format(start);
+  const endLabel = new Intl.DateTimeFormat("pl-PL", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).format(end);
+
+  return `${startLabel} - ${endLabel}`;
+}
+
+function formatPlanEditDate(value: string) {
+  return new Intl.DateTimeFormat("pl-PL", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -412,6 +476,7 @@ export function TrainingCoachApp() {
   const [raceDistance, setRaceDistance] = useState(10);
   const [raceTime, setRaceTime] = useState("00:45:00");
   const [weekStart, setWeekStart] = useState(getMondayISO());
+  const [calendarDate, setCalendarDate] = useState(weekStart);
   const [workoutsCount, setWorkoutsCount] = useState(4);
   const [garminImportStart, setGarminImportStart] = useState(weekStart);
   const [garminImportEnd, setGarminImportEnd] = useState(getWeekDates(weekStart)[6]);
@@ -427,16 +492,19 @@ export function TrainingCoachApp() {
   const [insights, setInsights] = useState<CoachInsights | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [activeView, setActiveView] = useState<WorkspaceView>("plan");
+  const [activeDrawer, setActiveDrawer] = useState<DrawerView>(null);
   const [savedSetup, setSavedSetup] = useState({ profile: false, zones: false });
 
   const weekDates = useMemo(() => getWeekDates(weekStart), [weekStart]);
   const goalSum = Object.values(goals).reduce((sum, value) => sum + value, 0);
   const setupReady = savedSetup.profile && savedSetup.zones;
+  const hasPlan = Boolean(plan?.workouts.length);
 
-  function changeWeekStart(nextWeekStart: string) {
-    setWeekStart(nextWeekStart);
+  function changeCalendarDate(nextCalendarDate: string) {
+    const nextWeekStart = getMondayISO(parseISODate(nextCalendarDate));
     const nextWeekDates = getWeekDates(nextWeekStart);
+    setCalendarDate(nextCalendarDate);
+    setWeekStart(nextWeekStart);
     setGarminImportStart(nextWeekStart);
     setGarminImportEnd(nextWeekDates[6]);
   }
@@ -480,6 +548,16 @@ export function TrainingCoachApp() {
     return grouped;
   }, [plan?.workouts, weekDates]);
 
+  const garminActivitiesByWorkoutId = useMemo(() => {
+    const activities = new Map<string, GarminActivity>();
+    for (const activity of garmin.activities) {
+      if (activity.workoutId) {
+        activities.set(activity.workoutId, activity);
+      }
+    }
+    return activities;
+  }, [garmin.activities]);
+
   const statusCounts = useMemo(() => {
     const counts: Record<WorkoutStatus, number> = {
       PLANNED: 0,
@@ -496,13 +574,9 @@ export function TrainingCoachApp() {
     return counts;
   }, [plan?.workouts]);
 
-  const selectedGarminActivity = useMemo(
-    () =>
-      selectedWorkout
-        ? (garmin.activities.find((activity) => activity.workoutId === selectedWorkout.id) ?? null)
-        : null,
-    [garmin.activities, selectedWorkout]
-  );
+  const selectedGarminActivity = selectedWorkout
+    ? garminActivitiesByWorkoutId.get(selectedWorkout.id) ?? null
+    : null;
   const canSendToGarmin =
     garmin.connection.connected &&
     garmin.connection.canExportWorkouts &&
@@ -527,9 +601,7 @@ export function TrainingCoachApp() {
   const applyPlanState = useCallback((nextPlan: TrainingPlan | null) => {
     setPlan(nextPlan);
     setSelectedWorkout((current) =>
-      nextPlan?.workouts.find((workout) => workout.id === current?.id) ??
-      nextPlan?.workouts[0] ??
-      null
+      current ? (nextPlan?.workouts.find((workout) => workout.id === current.id) ?? null) : null
     );
   }, []);
 
@@ -555,14 +627,13 @@ export function TrainingCoachApp() {
           zones: zonesResponse.zones.length > 0
         });
         if (!setupIsReady) {
-          setActiveView("setup");
+          setActiveDrawer("profile");
+          setMessage("Uzupełnij profil zawodnika przed generowaniem mikrocyklu.");
         }
         const garminOAuthMessage = readGarminOAuthMessageFromLocation();
         if (garminOAuthMessage) {
           setMessage(garminOAuthMessage);
-          if (setupIsReady) {
-            setActiveView("review");
-          }
+          setActiveDrawer("garmin");
         }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : "Nie udało się pobrać danych.");
@@ -641,7 +712,7 @@ export function TrainingCoachApp() {
       }
 
       if (authMode === "register") {
-        setActiveView("setup");
+        setActiveDrawer("profile");
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Nie udało się zalogować.");
@@ -650,37 +721,26 @@ export function TrainingCoachApp() {
     }
   }
 
-  async function saveProfile() {
+  async function saveAthleteProfile() {
     setBusy(true);
     setMessage("");
     try {
-      const response = await apiJson<{ profile: Profile }>("/api/profile", {
-        method: "PUT",
-        body: JSON.stringify(profile)
-      });
-      setProfile(response.profile);
-      setSavedSetup((current) => ({ ...current, profile: true }));
-      setMessage("Profil zapisany.");
+      const [profileResponse, zonesResponse] = await Promise.all([
+        apiJson<{ profile: Profile }>("/api/profile", {
+          method: "PUT",
+          body: JSON.stringify(profile)
+        }),
+        apiJson<{ zones: Zone[] }>("/api/zones", {
+          method: "PUT",
+          body: JSON.stringify({ zones })
+        })
+      ]);
+      setProfile(profileResponse.profile);
+      setZones(zonesResponse.zones);
+      setSavedSetup({ profile: true, zones: true });
+      setMessage("Profil zawodnika zapisany.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Nie udało się zapisać profilu.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveZones() {
-    setBusy(true);
-    setMessage("");
-    try {
-      const response = await apiJson<{ zones: Zone[] }>("/api/zones", {
-        method: "PUT",
-        body: JSON.stringify({ zones })
-      });
-      setZones(response.zones);
-      setSavedSetup((current) => ({ ...current, zones: true }));
-      setMessage("Strefy zapisane.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udało się zapisać stref.");
     } finally {
       setBusy(false);
     }
@@ -708,6 +768,29 @@ export function TrainingCoachApp() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function deleteRaceResult(id: string) {
+    setBusy(true);
+    setMessage("");
+    try {
+      await apiJson<{ deleted: true }>(`/api/race-results/${id}`, {
+        method: "DELETE"
+      });
+      setRaceResults((current) => current.filter((result) => result.id !== id));
+      setMessage("Wynik startowy usunięty.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udało się usunąć wyniku.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function confirmPlanReplacement() {
+    if (!hasPlan || typeof window === "undefined") return true;
+    return window.confirm(
+      "Ten tydzień ma już mikrocykl. Ponowne generowanie zastąpi obecne treningi dla wybranego tygodnia."
+    );
   }
 
   async function generatePlan(
@@ -741,12 +824,14 @@ export function TrainingCoachApp() {
         })
       });
       setPlan(response.plan);
-      setSelectedWorkout(response.plan.workouts[0] ?? null);
-      setMessage(successMessage ?? (
-        response.plan.source === "FALLBACK"
-          ? "Plan wygenerowany fallbackiem regułowym."
-          : "Plan wygenerowany przez Hugging Face."
-      ));
+      setSelectedWorkout(null);
+      setActiveDrawer(null);
+      setMessage(
+        successMessage ??
+          (response.plan.source === "FALLBACK"
+            ? "Mikrocykl wygenerowany fallbackiem regułowym."
+            : "Mikrocykl wygenerowany przez Hugging Face.")
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Nie udało się wygenerować planu.");
     } finally {
@@ -754,36 +839,9 @@ export function TrainingCoachApp() {
     }
   }
 
-  function applyCoachRecommendation() {
-    if (!insights) return;
-
-    setWorkoutsCount(insights.recommendation.nextWorkoutsCount);
-    setGoals(insights.recommendation.suggestedGoals);
-    setActiveView("plan");
-    setMessage("Rekomendacja coacha zastosowana w kreatorze.");
-  }
-
-  async function generateCoachPlan() {
-    if (!insights) return;
-
-    await generatePlan(
-      {
-        workoutsCount: insights.recommendation.nextWorkoutsCount,
-        goals: insights.recommendation.suggestedGoals
-      },
-      "Plan wygenerowany automatycznie na podstawie rekomendacji coacha."
-    );
-  }
-
-  async function generatePlanWithRecommendedGoals() {
-    if (!insights) return;
-
-    await generatePlan(
-      {
-        goals: insights.recommendation.suggestedGoals
-      },
-      "Plan wygenerowany z rekomendowanym rozkładem celów."
-    );
+  async function generateCurrentPlan() {
+    if (!confirmPlanReplacement()) return;
+    await generatePlan();
   }
 
   async function patchWorkout(id: string, payload: Partial<Workout>) {
@@ -803,6 +861,21 @@ export function TrainingCoachApp() {
     );
     setSelectedWorkout(response.workout);
     return response.workout;
+  }
+
+  async function saveWorkoutPatch(id: string, payload: Partial<Workout>) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const workout = await patchWorkout(id, payload);
+      setMessage("Zmiany treningu zapisane.");
+      return workout;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udało się zapisać treningu.");
+      throw error;
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function moveWorkout(workoutId: string, date: string) {
@@ -863,6 +936,13 @@ export function TrainingCoachApp() {
           : current
       );
       setSelectedWorkout(response.workout);
+      setMessage(
+        nextStatus === "DONE"
+          ? "Trening oznaczony jako wykonany."
+          : nextStatus === "SKIPPED"
+            ? "Trening oznaczony jako pominięty."
+            : "Status treningu zmieniony."
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Nie udało się zmienić statusu.");
     } finally {
@@ -923,11 +1003,11 @@ export function TrainingCoachApp() {
       }
       setMessage(
         response.export.reused
-          ? "Ten trening byl juz w kalendarzu Garmin."
-          : "Trening wyslany do kalendarza Garmin."
+          ? "Ten trening był już w kalendarzu Garmin."
+          : "Trening wysłany do kalendarza Garmin."
       );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udalo sie wyslac do Garmin.");
+      setMessage(error instanceof Error ? error.message : "Nie udało się wysłać do Garmin.");
     } finally {
       setBusy(false);
     }
@@ -952,11 +1032,11 @@ export function TrainingCoachApp() {
       applyPlanState(response.plan);
       setMessage(
         response.failedCount > 0
-          ? `Garmin: wyslano ${response.exportedCount}, bledy ${response.failedCount}, pominieto ${response.skippedCount}.`
-          : `Garmin: nowe ${response.exportedCount}, juz byly ${response.reusedCount}, pominieto ${response.skippedCount}.`
+          ? `Garmin: wysłano ${response.exportedCount}, błędy ${response.failedCount}, pominięto ${response.skippedCount}.`
+          : `Garmin: nowe ${response.exportedCount}, już były ${response.reusedCount}, pominięto ${response.skippedCount}.`
       );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udalo sie wyslac tygodnia do Garmin.");
+      setMessage(error instanceof Error ? error.message : "Nie udało się wysłać tygodnia do Garmin.");
     } finally {
       setBusy(false);
     }
@@ -970,9 +1050,9 @@ export function TrainingCoachApp() {
         method: "POST"
       });
       setGarmin(response);
-      setMessage("Garmin Connect polaczony w trybie mock.");
+      setMessage("Garmin mock połączony.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udalo sie polaczyc Garmin.");
+      setMessage(error instanceof Error ? error.message : "Nie udało się połączyć Garmin mock.");
     } finally {
       setBusy(false);
     }
@@ -985,18 +1065,37 @@ export function TrainingCoachApp() {
       const response = await apiJson<GarminDisconnectResponse>("/api/garmin", {
         method: "DELETE"
       });
-      setGarmin({
-        connection: response.connection,
-        config: response.config,
-        activities: response.activities
-      });
+      setGarmin(response);
       setMessage(
         response.disconnect?.remoteError
-          ? "Garmin Connect rozlaczony lokalnie. Zdalne wyrejestrowanie nie powiodlo sie."
-          : "Garmin Connect rozlaczony."
+          ? `Garmin rozłączony lokalnie. Błąd zdalnego odwołania: ${response.disconnect.remoteError}`
+          : "Garmin rozłączony."
       );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udalo sie rozlaczyc Garmin.");
+      setMessage(error instanceof Error ? error.message : "Nie udało się rozłączyć Garmin.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importGarminActivities() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await apiJson<GarminDashboard & { importedCount: number }>(
+        "/api/garmin/activities/import",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            startDate: garminImportStart,
+            endDate: garminImportEnd
+          })
+        }
+      );
+      setGarmin(response);
+      setMessage(`Zaimportowano aktywności Garmin: ${response.importedCount}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nie udało się importować aktywności.");
     } finally {
       setBusy(false);
     }
@@ -1010,54 +1109,24 @@ export function TrainingCoachApp() {
         method: "POST"
       });
       setGarmin(response);
-      setMessage("Zgody Garmin odswiezone.");
+      setMessage("Zgody Garmin odświeżone.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udalo sie odswiezyc zgody Garmin.");
+      setMessage(error instanceof Error ? error.message : "Nie udało się odświeżyć zgód Garmin.");
     } finally {
       setBusy(false);
     }
   }
 
-  async function importGarminActivities() {
-    setBusy(true);
-    setMessage("");
-    try {
-      const response = await apiJson<
-        GarminDashboard & { importedCount: number; matchedWorkoutCount: number }
-      >(
-        "/api/garmin/activities/import",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            startDate: garminImportStart,
-            endDate: garminImportEnd
-          })
-        }
-      );
-      setGarmin({
-        connection: response.connection,
-        config: response.config,
-        activities: response.activities
-      });
-      const planResponse = await apiJson<{ plan: TrainingPlan | null }>(
-        `/api/plans?weekStart=${weekStart}`
-      );
-      applyPlanState(planResponse.plan);
-      setMessage(
-        `Zaimportowano aktywnosci Garmin: ${response.importedCount}. Dopasowano treningi: ${response.matchedWorkoutCount}.`
-      );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Nie udalo sie pobrac danych Garmin.");
-    } finally {
-      setBusy(false);
-    }
+  function openWorkout(workout: Workout) {
+    setSelectedWorkout(workout);
+    setActiveDrawer("workout");
   }
 
-  if (status === "loading") {
+  if (status === "loading" && session) {
     return <LoadingScreen />;
   }
 
-  if (!session) {
+  if (status !== "authenticated") {
     return (
       <AuthScreen
         authMode={authMode}
@@ -1073,115 +1142,42 @@ export function TrainingCoachApp() {
     );
   }
 
-  const hasPlan = Boolean(plan?.workouts.length);
-  const viewMeta = {
-    setup: {
-      title: "Dane zawodnika",
-      description: "Ustaw profil, wyniki i strefy, które będą podstawą planu."
-    },
-    plan: {
-      title: "Plan tygodnia",
-      description: "Dobierz obciążenie, wygeneruj tydzień i popraw poszczególne treningi."
-    },
-    review: {
-      title: "Realizacja",
-      description: "Śledź wykonanie, wykorzystaj rekomendację coacha i eksportuj jednostki."
-    }
-  } satisfies Record<WorkspaceView, { title: string; description: string }>;
-
   return (
-    <div className="min-h-screen bg-white text-[#202124]">
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[268px_1fr]">
-        <aside className="border-b border-[#d9dee3] bg-[#f8fafb] px-4 py-4 lg:border-b-0 lg:border-r lg:px-5 lg:py-6">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-lg font-semibold text-[#123130]">
-              <span className="grid h-9 w-9 place-items-center rounded-lg bg-[#007f7a] text-white">
-                <Dumbbell size={19} />
-              </span>
-              Training Coach
-            </div>
-            <button
-              aria-label="Wyloguj"
-              className="focus-ring rounded-lg border border-[#d9dee3] bg-white p-2.5 text-[#5f6368] hover:text-[#202124] lg:hidden"
-              type="button"
-              onClick={() => void signOut()}
-            >
-              <LogOut size={17} />
-            </button>
-          </div>
-          <p className="mt-4 hidden text-sm leading-6 text-[#5f6368] lg:block">
-            Przejdź od ustawień zawodnika do gotowego tygodnia i realizacji treningów.
-          </p>
-
-          <WorkflowNavigation
-            activeView={activeView}
-            hasPlan={hasPlan}
-            setupReady={setupReady}
-            onChange={setActiveView}
-          />
-
-          <div className="mt-6 hidden border-t border-[#d9dee3] pt-5 lg:block">
-            <p className="truncate text-sm text-[#5f6368]">{session.user?.email}</p>
-            <button
-              className="focus-ring mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[#3c4043] hover:bg-white"
-              type="button"
-              onClick={() => void signOut()}
-            >
-              <LogOut size={16} />
-              Wyloguj
-            </button>
-          </div>
-        </aside>
+    <div className="min-h-screen bg-[#f4f7f7] text-[#202124]">
+      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[252px_minmax(0,1fr)]">
+        <WorkspaceSidebar
+          garmin={garmin}
+          profile={profile}
+          setupReady={setupReady}
+          userEmail={session.user?.email ?? ""}
+          onOpenGarmin={() => setActiveDrawer("garmin")}
+          onOpenProfile={() => setActiveDrawer("profile")}
+        />
 
         <main className="thin-scrollbar min-w-0 overflow-x-hidden">
-          <header className="sticky top-0 z-10 border-b border-[#d9dee3] bg-white/95 px-4 py-4 backdrop-blur lg:px-7 lg:py-5">
-            <div className="mx-auto flex max-w-[1540px] flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#007f7a]">
-                  Etap {activeView === "setup" ? "1" : activeView === "plan" ? "2" : "3"} z 3
-                </p>
-                <h1 className="mt-1 text-2xl font-semibold tracking-tight">
-                  {viewMeta[activeView].title}
-                </h1>
-                <p className="mt-1 text-sm text-[#5f6368]">{viewMeta[activeView].description}</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="sr-only" htmlFor="week-start">
-                  Tydzień
-                </label>
-                <input
-                  className="focus-ring rounded-lg border border-[#c7cdd2] bg-white px-3 py-2.5 text-sm"
-                  id="week-start"
-                  type="date"
-                  value={weekStart}
-                  onChange={(event) => changeWeekStart(event.target.value)}
-                />
-                {activeView === "plan" ? (
-                  <button
-                    className="focus-ring flex items-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#005f5b]"
-                    disabled={busy || goalSum !== 100 || !setupReady}
-                    type="button"
-                    onClick={() => void generatePlan()}
+          <header className="sticky top-0 z-20 border-b border-[#d9dee3] bg-white/95 px-4 py-4 backdrop-blur lg:px-7">
+            <div className="mx-auto max-w-[1720px]">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={clsx(
+                      "rounded-md px-2.5 py-1 text-xs font-semibold",
+                      hasPlan ? "bg-[#eaf7ed] text-[#2f8d46]" : "bg-[#fff8e8] text-[#7a4d00]"
+                    )}
                   >
-                    <Wand2 size={16} />
-                    Generuj plan
-                  </button>
-                ) : (
-                  <button
-                    className="focus-ring flex items-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
-                    type="button"
-                    onClick={() => setActiveView("plan")}
-                  >
-                    <CalendarDays size={16} />
-                    Przejdź do planu
-                  </button>
-                )}
+                    {hasPlan ? "Mikrocykl aktywny" : "Brak mikrocyklu"}
+                  </span>
+                  <span className="text-xs font-medium text-[#5f6368]">
+                    {weekDates[0]} - {weekDates[6]}
+                  </span>
+                </div>
+                <h1 className="mt-2 text-2xl font-semibold tracking-tight">Kalendarz zawodnika</h1>
               </div>
             </div>
           </header>
 
           {message ? (
-            <div className="mx-auto max-w-[1540px] px-4 pt-4 lg:px-7">
+            <div className="mx-auto max-w-[1720px] px-4 pt-4 lg:px-7">
               <div
                 className="rounded-lg border border-[#b9ddda] bg-[#effbf9] px-4 py-3 text-sm text-[#134b48]"
                 role="status"
@@ -1191,165 +1187,126 @@ export function TrainingCoachApp() {
             </div>
           ) : null}
 
-          <div className="mx-auto max-w-[1540px] space-y-5 px-4 py-5 lg:px-7">
-            <WorkflowProgress
-              activeView={activeView}
+          <div className="mx-auto max-w-[1720px] space-y-5 px-4 py-5 lg:px-7">
+            <MicrocyclePlanner
+              busy={busy}
+              goalSum={goalSum}
+              goals={goals}
               hasPlan={hasPlan}
+              insights={insights}
+              plan={plan}
               setupReady={setupReady}
+              workoutsCount={workoutsCount}
+              setGoals={setGoals}
+              setWorkoutsCount={setWorkoutsCount}
+              onGenerate={generateCurrentPlan}
             />
 
-            {activeView === "setup" ? (
-              <>
-                <div className="grid items-start gap-5 xl:grid-cols-[minmax(320px,0.8fr)_minmax(420px,1fr)]">
-                  <ProfilePanel
-                    busy={busy}
-                    profile={profile}
-                    raceDistance={raceDistance}
-                    raceResults={raceResults}
-                    raceTime={raceTime}
-                    setProfile={setProfile}
-                    setRaceDistance={setRaceDistance}
-                    setRaceTime={setRaceTime}
-                    onAddRaceResult={addRaceResult}
-                    onSaveProfile={saveProfile}
-                  />
-                  <ZonesPanel
-                    busy={busy}
-                    zones={zones}
-                    setZones={setZones}
-                    onSaveZones={saveZones}
-                  />
-                </div>
-                <NextStepCard
-                  description="Gdy profil i strefy odzwierciedlają Twoją formę, ułóż parametry najbliższego tygodnia."
-                  label="Przejdź do planowania"
-                  onClick={() => setActiveView("plan")}
-                  title="Dane gotowe do użycia?"
-                />
-              </>
-            ) : null}
-
-            {activeView === "plan" ? (
-              <>
-                <WizardPanel
-                  busy={busy}
+            <div className="grid items-start gap-5 2xl:grid-cols-[minmax(0,1fr)_370px]">
+              <CalendarPanel
+                calendarDate={calendarDate}
+                garminActivitiesByWorkoutId={garminActivitiesByWorkoutId}
+                groupedWorkouts={groupedWorkouts}
+                selectedWorkoutId={selectedWorkout?.id ?? null}
+                weekDates={weekDates}
+                onCalendarDateChange={changeCalendarDate}
+                onMoveWorkout={moveWorkout}
+                onSelectWorkout={openWorkout}
+              />
+              <aside className="space-y-5 2xl:sticky 2xl:top-28">
+                <MicrocycleSummary
                   goals={goals}
-                  goalSum={goalSum}
                   insights={insights}
-                  setGoals={setGoals}
-                  setWorkoutsCount={setWorkoutsCount}
+                  plan={plan}
+                  statusCounts={statusCounts}
                   workoutsCount={workoutsCount}
-                  onApplyRecommendation={applyCoachRecommendation}
-                  onGenerateRecommendation={generatePlanWithRecommendedGoals}
                 />
-                <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-                  <CalendarPanel
-                    groupedWorkouts={groupedWorkouts}
-                    selectedWorkoutId={selectedWorkout?.id ?? null}
-                    weekDates={weekDates}
-                    onMoveWorkout={moveWorkout}
-                    onSelectWorkout={setSelectedWorkout}
-                  />
-                  <section className="space-y-5 xl:sticky xl:top-32">
-                    <WorkoutEditor
-                      key={
-                        selectedWorkout
-                          ? `${selectedWorkout.id}-${selectedWorkout.status}-${selectedWorkout.date}-${selectedWorkout.title}-${selectedWorkout.durationMin}`
-                          : "empty-workout"
-                      }
-                      busy={busy}
-                      canSendToGarmin={canSendToGarmin}
-                      garminActivity={selectedGarminActivity}
-                      workout={selectedWorkout}
-                      weekDates={weekDates}
-                      onAccept={acceptWorkout}
-                      onChangeStatus={changeStatus}
-                      onExport={exportWorkout}
-                      onMoveWorkout={moveWorkout}
-                      onSendToGarmin={sendWorkoutToGarmin}
-                      onPatch={patchWorkout}
-                    />
-                    <SummaryPanel
-                      goals={goals}
-                      plan={plan}
-                      statusCounts={statusCounts}
-                      workoutsCount={workoutsCount}
-                    />
-                  </section>
-                </div>
-              </>
-            ) : null}
-
-            {activeView === "review" ? (
-              <>
-                <CoachPanel
-                  busy={busy}
-                  insights={insights}
-                  onApplyRecommendation={applyCoachRecommendation}
-                  onGenerateRecommendation={generateCoachPlan}
-                />
-                <GarminPanel
-                  busy={busy}
+                <GarminCompact
                   garmin={garmin}
-                  onConnectMock={connectGarminMock}
-                  onDisconnect={disconnectGarmin}
-                  onExportWeek={sendWeekToGarmin}
-                  importEndDate={garminImportEnd}
-                  importStartDate={garminImportStart}
-                  onImportActivities={importGarminActivities}
-                  onRefreshPermissions={refreshGarminPermissions}
-                  onImportEndDateChange={changeGarminImportEnd}
-                  onImportStartDateChange={changeGarminImportStart}
                   hasPlan={hasPlan}
+                  onOpen={() => setActiveDrawer("garmin")}
                 />
-                <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-                  <CalendarPanel
-                    groupedWorkouts={groupedWorkouts}
-                    selectedWorkoutId={selectedWorkout?.id ?? null}
-                    weekDates={weekDates}
-                    onMoveWorkout={moveWorkout}
-                    onSelectWorkout={setSelectedWorkout}
-                  />
-                  <section className="space-y-5 xl:sticky xl:top-32">
-                    <WorkoutEditor
-                      key={
-                        selectedWorkout
-                          ? `${selectedWorkout.id}-${selectedWorkout.status}-${selectedWorkout.date}-${selectedWorkout.title}-${selectedWorkout.durationMin}`
-                          : "empty-workout-review"
-                      }
-                      busy={busy}
-                      canSendToGarmin={canSendToGarmin}
-                      garminActivity={selectedGarminActivity}
-                      workout={selectedWorkout}
-                      weekDates={weekDates}
-                      onAccept={acceptWorkout}
-                      onChangeStatus={changeStatus}
-                      onExport={exportWorkout}
-                      onMoveWorkout={moveWorkout}
-                      onSendToGarmin={sendWorkoutToGarmin}
-                      onPatch={patchWorkout}
-                    />
-                    <SummaryPanel
-                      goals={goals}
-                      plan={plan}
-                      statusCounts={statusCounts}
-                      workoutsCount={workoutsCount}
-                    />
-                  </section>
-                </div>
-              </>
-            ) : null}
+              </aside>
+            </div>
           </div>
         </main>
       </div>
+
+      <ContextDrawer
+        title={
+          activeDrawer === "profile"
+            ? "Profil zawodnika"
+            : activeDrawer === "garmin"
+              ? "Garmin Connect"
+              : "Szczegóły treningu"
+        }
+        open={activeDrawer !== null}
+        onClose={() => setActiveDrawer(null)}
+      >
+        {activeDrawer === "profile" ? (
+          <ProfileDrawerContent
+            busy={busy}
+            profile={profile}
+            raceDistance={raceDistance}
+            raceResults={raceResults}
+            raceTime={raceTime}
+            zones={zones}
+            setProfile={setProfile}
+            setRaceDistance={setRaceDistance}
+            setRaceTime={setRaceTime}
+            setZones={setZones}
+            onAddRaceResult={addRaceResult}
+            onDeleteRaceResult={deleteRaceResult}
+            onSaveProfile={saveAthleteProfile}
+          />
+        ) : null}
+        {activeDrawer === "workout" ? (
+          <WorkoutDrawerContent
+            key={
+              selectedWorkout
+                ? `${selectedWorkout.id}-${selectedWorkout.status}-${selectedWorkout.date}-${selectedWorkout.title}-${selectedWorkout.durationMin}`
+                : "empty-workout"
+            }
+            busy={busy}
+            canSendToGarmin={canSendToGarmin}
+            garminActivity={selectedGarminActivity}
+            workout={selectedWorkout}
+            weekDates={weekDates}
+            onAccept={acceptWorkout}
+            onChangeStatus={changeStatus}
+            onExport={exportWorkout}
+            onMoveWorkout={moveWorkout}
+            onPatch={saveWorkoutPatch}
+            onSendToGarmin={sendWorkoutToGarmin}
+          />
+        ) : null}
+        {activeDrawer === "garmin" ? (
+          <GarminDrawerContent
+            busy={busy}
+            garmin={garmin}
+            hasPlan={hasPlan}
+            importEndDate={garminImportEnd}
+            importStartDate={garminImportStart}
+            onConnectMock={connectGarminMock}
+            onDisconnect={disconnectGarmin}
+            onExportWeek={sendWeekToGarmin}
+            onImportActivities={importGarminActivities}
+            onImportEndDateChange={changeGarminImportEnd}
+            onImportStartDateChange={changeGarminImportStart}
+            onRefreshPermissions={refreshGarminPermissions}
+          />
+        ) : null}
+      </ContextDrawer>
     </div>
   );
 }
 
 function LoadingScreen() {
   return (
-    <div className="grid min-h-screen place-items-center bg-white text-sm text-[#5f6368]">
-      Ładowanie Training Coach...
+    <div className="grid min-h-screen place-items-center bg-[#f4f7f7] text-[#202124]">
+      <div className="rounded-lg border border-[#d9dee3] bg-white px-5 py-4 text-sm font-medium">
+        Ładowanie Training Coach...
+      </div>
     </div>
   );
 }
@@ -1361,380 +1318,940 @@ function AuthScreen(props: {
   message: string;
   password: string;
   setAuthMode: (mode: "login" | "register") => void;
-  setEmail: (value: string) => void;
-  setPassword: (value: string) => void;
+  setEmail: (email: string) => void;
+  setPassword: (password: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const isRegister = props.authMode === "register";
+
   return (
-    <main className="grid min-h-screen bg-white lg:grid-cols-[1fr_440px]">
-      <section className="hidden border-r border-[#d9dee3] bg-[#f8fafb] p-8 lg:block">
+    <div className="grid min-h-screen bg-[#f4f7f7] text-[#202124] lg:grid-cols-[1.1fr_0.9fr]">
+      <section className="flex min-h-[42vh] flex-col justify-between bg-[#123130] px-6 py-7 text-white lg:min-h-screen lg:px-10">
         <div className="flex items-center gap-2 text-lg font-semibold">
-          <span className="grid h-8 w-8 place-items-center rounded-md bg-[#007f7a] text-white">
-            <Dumbbell size={18} />
+          <span className="grid h-9 w-9 place-items-center rounded-lg bg-[#00a19a]">
+            <Dumbbell size={19} />
           </span>
           Training Coach
         </div>
-        <div className="mt-8 grid max-w-5xl grid-cols-7 gap-2">
-          {dayLabels.map((label, index) => (
-            <div className="min-h-[560px] rounded-md border border-[#d9dee3] bg-white p-3" key={label}>
-              <div className="text-xs font-semibold uppercase text-[#5f6368]">{label}</div>
-              {index === 1 ? (
-                <div className="mt-4 rounded-md border-l-4 border-[#e6634f] bg-[#fff7f5] p-3 text-sm">
-                  <div className="font-semibold">Interwały krótkie</div>
-                  <div className="mt-1 text-[#5f6368]">55 min · Z4</div>
-                </div>
-              ) : null}
-              {index === 4 ? (
-                <div className="mt-4 rounded-md border-l-4 border-[#007f7a] bg-[#effbf9] p-3 text-sm">
-                  <div className="font-semibold">Tempo progowe</div>
-                  <div className="mt-1 text-[#5f6368]">60 min · Z3</div>
-                </div>
-              ) : null}
-              {index === 6 ? (
-                <div className="mt-4 rounded-md border-l-4 border-[#2f8d46] bg-[#f0faf2] p-3 text-sm">
-                  <div className="font-semibold">Długi bieg</div>
-                  <div className="mt-1 text-[#5f6368]">85 min · Z2</div>
-                </div>
-              ) : null}
-            </div>
-          ))}
+        <div className="max-w-2xl">
+          <h1 className="text-4xl font-semibold tracking-tight lg:text-5xl">
+            Mikrocykl zawodnika w jednym kalendarzu.
+          </h1>
+          <p className="mt-5 max-w-xl text-base leading-7 text-[#cfe5e2]">
+            Profil, tygodniowy plan, realizacja i eksport treningów działają w jednym workspace.
+          </p>
+        </div>
+        <div className="grid gap-3 text-sm text-[#cfe5e2] sm:grid-cols-3">
+          <div className="rounded-lg border border-white/15 bg-white/5 p-3">
+            <div className="font-semibold text-white">AI + fallback</div>
+            <div className="mt-1">Generator utrzymuje tygodniową strukturę planu.</div>
+          </div>
+          <div className="rounded-lg border border-white/15 bg-white/5 p-3">
+            <div className="font-semibold text-white">Garmin</div>
+            <div className="mt-1">Import realizacji i wysyłka treningów do kalendarza.</div>
+          </div>
+          <div className="rounded-lg border border-white/15 bg-white/5 p-3">
+            <div className="font-semibold text-white">Coach</div>
+            <div className="mt-1">Wnioski z wykonania i rekomendacje kolejnego tygodnia.</div>
+          </div>
         </div>
       </section>
-      <section className="flex items-center justify-center p-6">
+
+      <main className="flex items-center justify-center px-4 py-10">
         <form
-          className="w-full max-w-sm rounded-md border border-[#d9dee3] bg-white p-6 shadow-sm"
+          className="w-full max-w-md rounded-lg border border-[#d9dee3] bg-white p-5 shadow-sm"
           onSubmit={props.onSubmit}
         >
-          <div className="flex items-center gap-2 text-lg font-semibold lg:hidden">
-            <span className="grid h-8 w-8 place-items-center rounded-md bg-[#007f7a] text-white">
-              <Dumbbell size={18} />
-            </span>
-            Training Coach
+          <div className="mb-5">
+            <h2 className="text-2xl font-semibold">{isRegister ? "Nowe konto" : "Logowanie"}</h2>
+            <p className="mt-2 text-sm leading-6 text-[#5f6368]">
+              {isRegister
+                ? "Zmień email, aby utworzyć nowe konto testowe."
+                : "Konto demo jest wpisane automatycznie."}
+            </p>
           </div>
-          <h1 className="mt-6 text-xl font-semibold">
-            {props.authMode === "login" ? "Zaloguj do planera" : "Utwórz konto zawodnika"}
-          </h1>
-          <p className="mt-2 text-sm text-[#5f6368]">
-            Dane treningowe są przypisane do zalogowanego użytkownika.
-          </p>
-          <p className="mt-3 rounded-md bg-[#edf7f6] px-3 py-2 text-xs leading-5 text-[#315955]">
-            {props.authMode === "login"
-              ? "Konto demo jest wpisane automatycznie: runner@example.com / runner123."
-              : "Zmień email, aby utworzyć nowe konto. Hasło musi mieć co najmniej 8 znaków."}
-          </p>
-          <label className="mt-5 block text-sm font-medium" htmlFor="email">
-            Email
-          </label>
-          <input
-            className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-3 py-2 text-sm"
-            id="email"
-            type="email"
-            value={props.email}
-            onChange={(event) => props.setEmail(event.target.value)}
-          />
-          <label className="mt-4 block text-sm font-medium" htmlFor="password">
-            Hasło
-          </label>
-          <input
-            className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-3 py-2 text-sm"
-            id="password"
-            minLength={8}
-            type="password"
-            value={props.password}
-            onChange={(event) => props.setPassword(event.target.value)}
-          />
-          {props.message ? <p className="mt-3 text-sm text-[#c24135]">{props.message}</p> : null}
+
+          <div className="grid gap-4">
+            <label className="text-sm font-medium" htmlFor="email">
+              Email
+              <input
+                className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+                id="email"
+                type="email"
+                value={props.email}
+                onChange={(event) => props.setEmail(event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-medium" htmlFor="password">
+              Hasło
+              <input
+                className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+                id="password"
+                minLength={8}
+                type="password"
+                value={props.password}
+                onChange={(event) => props.setPassword(event.target.value)}
+              />
+            </label>
+          </div>
+
+          {props.message ? (
+            <div className="mt-4 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
+              {props.message}
+            </div>
+          ) : null}
+
           <button
-            className="focus-ring mt-5 w-full rounded-md bg-[#007f7a] px-4 py-2 text-sm font-semibold text-white hover:bg-[#005f5b]"
+            className="focus-ring mt-5 w-full rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white"
             disabled={props.busy}
             type="submit"
           >
-            {props.authMode === "login" ? "Zaloguj" : "Zarejestruj i zaloguj"}
+            {isRegister ? "Zarejestruj i zaloguj" : "Zaloguj"}
           </button>
+
           <button
-            className="focus-ring mt-3 w-full rounded-md border border-[#d9dee3] px-4 py-2 text-sm font-semibold text-[#202124]"
+            className="focus-ring mt-3 w-full rounded-lg border border-[#d9dee3] px-4 py-2.5 text-sm font-semibold text-[#3c4043]"
             type="button"
-            onClick={() => props.setAuthMode(props.authMode === "login" ? "register" : "login")}
+            onClick={() => props.setAuthMode(isRegister ? "login" : "register")}
           >
-            {props.authMode === "login" ? "Nie mam konta" : "Mam już konto"}
+            {isRegister ? "Mam już konto" : "Nie mam konta"}
           </button>
         </form>
-      </section>
-    </main>
+      </main>
+    </div>
   );
 }
 
-const workflowItems: Array<{
-  id: WorkspaceView;
+function WorkspaceSidebar(props: {
+  garmin: GarminDashboard;
+  profile: Profile;
+  setupReady: boolean;
+  userEmail: string;
+  onOpenGarmin: () => void;
+  onOpenProfile: () => void;
+}) {
+  return (
+    <aside className="border-b border-[#d9dee3] bg-white px-4 py-4 lg:border-b-0 lg:border-r lg:px-5 lg:py-6">
+      <div className="flex items-center justify-between gap-3 lg:block">
+        <div className="flex items-center gap-2 text-lg font-semibold text-[#123130]">
+          <span className="grid h-9 w-9 place-items-center rounded-lg bg-[#007f7a] text-white">
+            <Dumbbell size={19} />
+          </span>
+          Training Coach
+        </div>
+        <button
+          aria-label="Wyloguj"
+          className="focus-ring rounded-lg border border-[#d9dee3] bg-white p-2.5 text-[#5f6368] hover:text-[#202124] lg:hidden"
+          type="button"
+          onClick={() => void signOut()}
+        >
+          <LogOut size={17} />
+        </button>
+      </div>
+
+      <div className="mt-5 hidden rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 lg:block">
+        <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
+          Zawodnik
+        </div>
+        <div className="mt-2 text-sm font-semibold text-[#123130]">
+          {props.profile.targetRace || "Cel bez nazwy"}
+        </div>
+        <div className="mt-1 text-xs text-[#5f6368]">
+          {props.profile.weeklyVolumeKm ?? 0} km/tydz. · {props.profile.level}
+        </div>
+        <button
+          className="focus-ring mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-[#007f7a]"
+          type="button"
+          onClick={props.onOpenProfile}
+        >
+          <UserRound size={15} />
+          Profil zawodnika
+        </button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-1">
+        <StatusButton
+          icon={ShieldCheck}
+          label={props.setupReady ? "Profil gotowy" : "Uzupełnij profil"}
+          tone={props.setupReady ? "success" : "warning"}
+          onClick={props.onOpenProfile}
+        />
+        <StatusButton
+          icon={Activity}
+          label={props.garmin.connection.connected ? "Garmin połączony" : "Garmin"}
+          tone={props.garmin.connection.connected ? "success" : "neutral"}
+          onClick={props.onOpenGarmin}
+        />
+      </div>
+
+      <div className="mt-6 hidden border-t border-[#d9dee3] pt-5 lg:block">
+        <p className="truncate text-sm text-[#5f6368]">{props.userEmail}</p>
+        <button
+          className="focus-ring mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[#3c4043] hover:bg-[#f8fafb]"
+          type="button"
+          onClick={() => void signOut()}
+        >
+          <LogOut size={16} />
+          Wyloguj
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function StatusButton(props: {
+  icon: typeof Activity;
   label: string;
-  shortLabel: string;
-  description: string;
-  icon: typeof UserRound;
-}> = [
-  {
-    id: "setup",
-    label: "Dane zawodnika",
-    shortLabel: "Dane",
-    description: "Profil i strefy",
-    icon: UserRound
-  },
-  {
-    id: "plan",
-    label: "Zaplanuj tydzień",
-    shortLabel: "Plan",
-    description: "Kalendarz i edycja",
-    icon: CalendarDays
-  },
-  {
-    id: "review",
-    label: "Realizacja",
-    shortLabel: "Realizacja",
-    description: "Coach i eksport",
-    icon: BarChart3
-  }
-];
-
-function WorkflowNavigation(props: {
-  activeView: WorkspaceView;
-  hasPlan: boolean;
-  setupReady: boolean;
-  onChange: (view: WorkspaceView) => void;
+  tone: "success" | "warning" | "neutral";
+  onClick: () => void;
 }) {
+  const Icon = props.icon;
   return (
-    <nav
-      aria-label="Główne etapy"
-      className="mt-5 grid grid-cols-3 gap-2 lg:mt-8 lg:grid-cols-1 lg:gap-3"
+    <button
+      className={clsx(
+        "focus-ring flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-semibold",
+        props.tone === "success" && "border-[#c8e6cf] bg-[#f0faf2] text-[#236b35]",
+        props.tone === "warning" && "border-[#f0d6a6] bg-[#fff8e8] text-[#7a4d00]",
+        props.tone === "neutral" && "border-[#d9dee3] bg-[#f8fafb] text-[#3c4043]"
+      )}
+      type="button"
+      onClick={props.onClick}
     >
-      {workflowItems.map((item, index) => {
-        const Icon = item.icon;
-        const active = props.activeView === item.id;
-        const completed =
-          (item.id === "setup" && props.setupReady) || (item.id === "plan" && props.hasPlan);
-
-        return (
-          <button
-            aria-current={active ? "step" : undefined}
-            className={clsx(
-              "focus-ring flex min-w-0 flex-col items-center justify-center gap-1 rounded-xl border px-1.5 py-2.5 text-center transition sm:flex-row sm:justify-start sm:gap-3 sm:px-2.5 sm:py-3 sm:text-left lg:px-3",
-              active
-                ? "border-[#b9ddda] bg-white text-[#007f7a] shadow-sm"
-                : "border-transparent text-[#3c4043] hover:border-[#e2e8eb] hover:bg-white"
-            )}
-            key={item.id}
-            type="button"
-            onClick={() => props.onChange(item.id)}
-          >
-            <span
-              className={clsx(
-                "grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold",
-                active
-                  ? "bg-[#007f7a] text-white"
-                  : completed
-                    ? "bg-[#e3f4f2] text-[#007f7a]"
-                    : "bg-white text-[#5f6368]"
-              )}
-            >
-              {completed && !active ? <Check size={16} /> : active ? <Icon size={16} /> : index + 1}
-            </span>
-            <span className="hidden min-w-0 lg:block">
-              <span className="block text-sm font-semibold">{item.label}</span>
-              <span className="mt-0.5 block text-xs text-[#5f6368]">{item.description}</span>
-            </span>
-            <span className="whitespace-nowrap text-[11px] font-semibold leading-tight sm:text-xs lg:hidden">
-              {item.shortLabel}
-            </span>
-          </button>
-        );
-      })}
-    </nav>
+      <Icon size={16} />
+      {props.label}
+    </button>
   );
 }
 
-function WorkflowProgress(props: {
-  activeView: WorkspaceView;
+function MicrocyclePlanner(props: {
+  busy: boolean;
+  goalSum: number;
+  goals: GoalAllocation;
   hasPlan: boolean;
+  insights: CoachInsights | null;
+  plan: TrainingPlan | null;
   setupReady: boolean;
+  workoutsCount: number;
+  setGoals: (goals: GoalAllocation) => void;
+  setWorkoutsCount: (value: number) => void;
+  onGenerate: () => void;
 }) {
-  return (
-    <section
-      aria-label="Postęp planowania"
-      className="hidden gap-3 rounded-xl border border-[#e2e8eb] bg-[#f8fafb] p-3 sm:grid sm:grid-cols-3 sm:gap-0 sm:p-4"
-    >
-      {workflowItems.map((item, index) => {
-        const active = item.id === props.activeView;
-        const completed =
-          (item.id === "setup" && props.setupReady) || (item.id === "plan" && props.hasPlan);
+  const recommendation = props.insights?.recommendation;
+  const generationDisabled = props.busy || props.goalSum !== 100 || !props.setupReady;
 
-        return (
+  return (
+    <section className="rounded-lg border border-[#d9dee3] bg-white shadow-sm">
+      <div className="border-b border-[#e2e8eb] px-4 py-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <SectionHeading
+            description="Liczba treningów, rozkład bodźców i rekomendacja dla wybranego tygodnia."
+            icon={Target}
+            title="Mikrocykl tygodniowy"
+          />
+          <button
+            className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#005f5b]"
+            disabled={generationDisabled}
+            type="button"
+            onClick={() => void props.onGenerate()}
+          >
+            <Wand2 size={16} />
+            {props.hasPlan ? "Wygeneruj ponownie" : "Generuj plan"}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(260px,0.65fr)_minmax(0,1fr)]">
+        <div className="grid gap-3 sm:grid-cols-[160px_minmax(0,1fr)] xl:block">
+          <label className="block text-sm font-medium">
+            Liczba treningów
+            <input
+              className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+              max={7}
+              min={1}
+              type="number"
+              value={props.workoutsCount}
+              onChange={(event) => props.setWorkoutsCount(Number(event.target.value))}
+            />
+          </label>
           <div
             className={clsx(
-              "flex items-center gap-3 sm:border-l sm:border-[#d9dee3] sm:px-4 sm:first:border-l-0 sm:first:pl-0",
-              !active && "text-[#5f6368]"
+              "rounded-lg px-3 py-2.5 text-sm xl:mt-3",
+              props.goalSum === 100 ? "bg-[#edf7f6] text-[#236b35]" : "bg-[#fff7f5] text-[#c24135]"
             )}
-            key={item.id}
           >
-            <span
-              className={clsx(
-                "grid h-8 w-8 shrink-0 place-items-center rounded-full text-sm font-semibold",
-                active
-                  ? "bg-[#007f7a] text-white"
-                  : completed
-                    ? "bg-[#e3f4f2] text-[#007f7a]"
-                    : "border border-[#d9dee3] bg-white"
-              )}
-            >
-              {completed && !active ? <Check size={16} /> : index + 1}
-            </span>
-            <span>
-              <span className="block text-sm font-semibold">{item.label}</span>
-              <span className="hidden text-xs text-[#5f6368] sm:block">{item.description}</span>
-            </span>
+            <div className="font-semibold">
+              {props.goalSum === 100 ? "Gotowe do generowania" : "Wymagane 100%"}
+            </div>
+            <div className="mt-1 text-xs">Suma celów: {props.goalSum}%</div>
           </div>
-        );
-      })}
+          {!props.setupReady ? (
+            <div className="mt-3 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-xs leading-5 text-[#7a4d00]">
+              Najpierw zapisz profil zawodnika i strefy.
+            </div>
+          ) : null}
+          {props.plan?.updatedAt ? (
+            <div className="mt-3 rounded-lg bg-[#f8fafb] px-3 py-2.5 text-xs leading-5 text-[#5f6368]">
+              Ostatnia edycja mikrocyklu:{" "}
+              <span className="font-semibold text-[#3c4043]">
+                {formatPlanEditDate(props.plan.updatedAt)}
+              </span>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="grid gap-4">
+          <fieldset className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+            <legend className="sr-only">Rozkład celów w procentach</legend>
+            {(Object.keys(goalLabels) as Array<keyof GoalAllocation>).map((key) => (
+              <label className="block rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-2.5" key={key}>
+                <span className="text-xs font-semibold text-[#5f6368]">{goalLabels[key]}</span>
+                <input
+                  className="focus-ring mt-2 w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                  min={0}
+                  max={100}
+                  type="number"
+                  value={props.goals[key]}
+                  onChange={(event) =>
+                    props.setGoals({
+                      ...props.goals,
+                      [key]: Number(event.target.value)
+                    })
+                  }
+                />
+                <div className="mt-2 h-1.5 rounded-full bg-[#e2e8eb]">
+                  <div
+                    className="h-1.5 rounded-full bg-[#007f7a]"
+                    style={{ width: `${props.goals[key]}%` }}
+                  />
+                </div>
+              </label>
+            ))}
+          </fieldset>
+
+          {recommendation ? (
+            <div className="rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3">
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-semibold text-[#123130]">
+                    <Bot size={16} />
+                    {recommendation.title}
+                  </div>
+                  <p className="mt-1 text-sm leading-6 text-[#315955]">
+                    {recommendation.planningFocus}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Metric label="Auto plan" value={`${recommendation.nextWorkoutsCount} tr.`} />
+                  <Metric label="Cel czasu" value={`${recommendation.weeklyMinutesTarget} min`} />
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
     </section>
   );
 }
 
-function NextStepCard(props: {
-  description: string;
-  label: string;
-  onClick: () => void;
-  title: string;
+function CalendarPanel(props: {
+  calendarDate: string;
+  garminActivitiesByWorkoutId: Map<string, GarminActivity>;
+  groupedWorkouts: Map<string, Workout[]>;
+  selectedWorkoutId: string | null;
+  weekDates: string[];
+  onCalendarDateChange: (date: string) => void;
+  onMoveWorkout: (workoutId: string, date: string) => void;
+  onSelectWorkout: (workout: Workout) => void;
 }) {
+  function shiftWeek(days: number) {
+    props.onCalendarDateChange(toISODate(addDays(parseISODate(props.calendarDate), days)));
+  }
+
   return (
-    <section className="flex flex-col gap-4 rounded-xl border border-[#b9ddda] bg-[#effbf9] p-5 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <h2 className="text-base font-semibold text-[#123130]">{props.title}</h2>
-        <p className="mt-1 max-w-2xl text-sm leading-6 text-[#456461]">{props.description}</p>
+    <section className="rounded-lg border border-[#d9dee3] bg-white shadow-sm">
+      <div className="border-b border-[#e2e8eb] px-4 py-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <SectionHeading
+            description="Kliknij jednostkę, żeby otworzyć szczegóły po prawej stronie."
+            icon={CalendarDays}
+            title="Kalendarz tygodnia"
+          />
+          <div className="flex w-full max-w-full items-stretch overflow-hidden rounded-lg border border-[#d9dee3] bg-white sm:w-auto">
+            <button
+              aria-label="Poprzedni tydzień"
+              className="focus-ring grid h-10 w-10 shrink-0 place-items-center border-r border-[#d9dee3] text-[#3c4043] hover:bg-[#edf7f6] hover:text-[#007f7a]"
+              data-testid="previous-week"
+              type="button"
+              onClick={() => shiftWeek(-7)}
+            >
+              <ChevronLeft size={17} />
+            </button>
+            <label className="sr-only" htmlFor="week-start">
+              Wybierz datę, aby przejść do tygodnia
+            </label>
+            <div
+              className="relative h-10 min-w-0 flex-1 focus-within:ring-2 focus-within:ring-[#007f7a]/20 sm:w-[220px]"
+              data-testid="week-range-picker"
+            >
+              <input
+                aria-label={`Wybierz datę w tygodniu ${formatWeekRange(props.weekDates)}`}
+                className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+                id="week-start"
+                type="date"
+                value={props.calendarDate}
+                onChange={(event) => props.onCalendarDateChange(event.target.value)}
+              />
+              <div
+                aria-hidden="true"
+                className="pointer-events-none flex h-full items-center justify-center gap-2 px-3 text-sm font-semibold text-[#202124]"
+              >
+                <CalendarDays className="shrink-0 text-[#007f7a]" size={15} />
+                <span className="truncate">{formatWeekRange(props.weekDates)}</span>
+              </div>
+            </div>
+            <button
+              aria-label="Następny tydzień"
+              className="focus-ring grid h-10 w-10 shrink-0 place-items-center border-l border-[#d9dee3] text-[#3c4043] hover:bg-[#edf7f6] hover:text-[#007f7a]"
+              data-testid="next-week"
+              type="button"
+              onClick={() => shiftWeek(7)}
+            >
+              <ChevronRight size={17} />
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className="grid gap-2 p-3 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+        {props.weekDates.map((date, index) => {
+          const dayWorkouts = props.groupedWorkouts.get(date) ?? [];
+
+          return (
+            <div
+              className="min-h-[210px] rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-2.5 xl:min-h-[430px]"
+              data-testid={`day-${date}`}
+              key={date}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                const workoutId = event.dataTransfer.getData("text/plain");
+                if (workoutId) {
+                  void props.onMoveWorkout(workoutId, date);
+                }
+              }}
+            >
+              <div className="flex items-center justify-between px-1 pb-2">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-[#5f6368]">
+                    {dayLabels[index]}
+                  </div>
+                  <div className="text-sm font-semibold">{date.slice(5)}</div>
+                </div>
+                <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#7b8286]">
+                  {dayWorkouts.length || "off"}
+                </span>
+              </div>
+
+              <div className="space-y-2">
+                {dayWorkouts.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-[#d9dee3] bg-white/70 px-3 py-5 text-center text-xs font-medium text-[#7b8286]">
+                    Odpoczynek
+                  </div>
+                ) : null}
+                {dayWorkouts.map((workout) => {
+                  const activity = props.garminActivitiesByWorkoutId.get(workout.id) ?? null;
+                  const firstSegment = workout.segments?.[0] ?? null;
+
+                  return (
+                    <button
+                      className={clsx(
+                        "focus-ring w-full rounded-lg border bg-white p-3 text-left text-sm transition hover:border-[#007f7a] hover:shadow-sm",
+                        props.selectedWorkoutId === workout.id
+                          ? "border-[#007f7a] shadow-[inset_3px_0_0_#007f7a]"
+                          : "border-[#d9dee3]"
+                      )}
+                      data-testid={`workout-${workout.id}`}
+                      draggable
+                      key={workout.id}
+                      type="button"
+                      onClick={() => props.onSelectWorkout(workout)}
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData("text/plain", workout.id);
+                      }}
+                    >
+                      <div className="mb-2 flex min-h-5 items-start">
+                        <span
+                          className={clsx(
+                            "inline-flex max-w-full items-center rounded-md px-1.5 py-0.5 text-left text-[10px] font-semibold leading-tight break-words",
+                            statusTone[workout.status]
+                          )}
+                          title={statusLabels[workout.status]}
+                        >
+                          {statusLabels[workout.status]}
+                        </span>
+                      </div>
+                      <div className="min-w-0 break-words font-semibold leading-5 text-[#202124]">
+                        {workout.title}
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-[#5f6368]">
+                        <span>{workout.durationMin} min</span>
+                        <span>·</span>
+                        <span>{workout.goal}</span>
+                        <span>·</span>
+                        <span>{workout.zoneName}</span>
+                      </div>
+                      {firstSegment ? (
+                        <div className="mt-2 rounded-md bg-[#f8fafb] px-2 py-1.5 text-xs leading-5 text-[#3c4043]">
+                          {formatPaceRange(firstSegment)} · {formatHeartRateRange(firstSegment)}
+                        </div>
+                      ) : null}
+                      <p className="mt-2 line-clamp-2 text-xs leading-5 text-[#3c4043]">
+                        {workout.structure}
+                      </p>
+                      <WorkoutRealization workout={workout} activity={activity} />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function WorkoutRealization(props: { workout: Workout; activity: GarminActivity | null }) {
+  if (props.activity) {
+    return (
+      <div className="mt-2 rounded-md border border-[#b9ddda] bg-[#effbf9] px-2 py-1.5 text-xs text-[#315955]">
+        Garmin: {formatDistanceMeters(props.activity.distanceMeters)} ·{" "}
+        {formatDurationShort(props.activity.durationSeconds)}
+      </div>
+    );
+  }
+
+  if (props.workout.status === "DONE" || props.workout.status === "EXPORTED") {
+    return (
+      <div className="mt-2 rounded-md bg-[#eaf7ed] px-2 py-1.5 text-xs font-semibold text-[#236b35]">
+        Realizacja: wykonane
+      </div>
+    );
+  }
+
+  if (props.workout.status === "SKIPPED") {
+    return (
+      <div className="mt-2 rounded-md bg-[#fff4ef] px-2 py-1.5 text-xs font-semibold text-[#9f2f24]">
+        Realizacja: pominięte
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 rounded-md bg-[#f8fafb] px-2 py-1.5 text-xs font-medium text-[#7b8286]">
+      Realizacja: oczekuje
+    </div>
+  );
+}
+
+function MicrocycleSummary(props: {
+  goals: GoalAllocation;
+  insights: CoachInsights | null;
+  plan: TrainingPlan | null;
+  statusCounts: Record<WorkoutStatus, number>;
+  workoutsCount: number;
+}) {
+  const currentWeek = props.insights?.currentWeek;
+  const recommendation = props.insights?.recommendation;
+
+  return (
+    <section className="rounded-lg border border-[#d9dee3] bg-white shadow-sm">
+      <div className="border-b border-[#e2e8eb] px-4 py-4">
+        <SectionHeading
+          description="Założenia, wykonanie i wnioski dla wybranego tygodnia."
+          icon={BarChart3}
+          title="Podsumowanie mikrocyklu"
+        />
+      </div>
+      <div className="space-y-4 p-4">
+        <div className="grid grid-cols-2 gap-2">
+          <Metric label="Źródło" value={formatPlanSource(props.plan)} />
+          <Metric
+            label="Treningi"
+            value={`${props.plan?.workouts.length ?? 0}/${props.workoutsCount}`}
+          />
+          <Metric
+            label="Wykonanie"
+            value={currentWeek ? `${currentWeek.completionRate}%` : "brak"}
+          />
+          <Metric
+            label="Minuty"
+            value={
+              currentWeek
+                ? `${currentWeek.completedMinutes}/${currentWeek.plannedMinutes}`
+                : "0/0"
+            }
+          />
+        </div>
+
+        <div className="space-y-2">
+          {(Object.keys(goalLabels) as Array<keyof GoalAllocation>).map((key) => (
+            <div key={key}>
+              <div className="mb-1 flex justify-between text-xs text-[#5f6368]">
+                <span>{goalLabels[key]}</span>
+                <span>{props.goals[key]}%</span>
+              </div>
+              <div className="h-2 rounded-full bg-[#edf0f2]">
+                <div
+                  className="h-2 rounded-full bg-[#007f7a]"
+                  style={{ width: `${props.goals[key]}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {(Object.keys(statusLabels) as WorkoutStatus[]).map((workoutStatus) => (
+            <Metric
+              key={workoutStatus}
+              label={statusLabels[workoutStatus]}
+              value={props.statusCounts[workoutStatus]}
+            />
+          ))}
+        </div>
+
+        {recommendation ? (
+          <div className="rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3 text-sm">
+            <div className="font-semibold text-[#123130]">{recommendation.title}</div>
+            <p className="mt-1 leading-5 text-[#315955]">{recommendation.rationale}</p>
+          </div>
+        ) : null}
+
+        {props.insights?.alerts.length ? (
+          <div className="space-y-2">
+            {props.insights.alerts.slice(0, 3).map((alert) => (
+              <div
+                className={clsx(
+                  "rounded-md px-3 py-2 text-xs leading-5",
+                  alert.level === "danger"
+                    ? "bg-[#fff4ef] text-[#9f2f24]"
+                    : alert.level === "success"
+                      ? "bg-[#eaf7ed] text-[#236b35]"
+                      : "bg-[#fff9e6] text-[#705a00]"
+                )}
+                key={alert.text}
+              >
+                {alert.text}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {props.plan?.requests?.[0]?.validationErrors ? (
+          <p className="rounded-md bg-[#fff7f5] p-3 text-xs leading-5 text-[#c24135]">
+            AI odrzucone: {props.plan.requests[0].validationErrors}
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function GarminCompact(props: {
+  garmin: GarminDashboard;
+  hasPlan: boolean;
+  onOpen: () => void;
+}) {
+  const connected = props.garmin.connection.connected;
+
+  return (
+    <section className="rounded-lg border border-[#d9dee3] bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <SectionHeading
+          description={`${props.garmin.activities.length} aktywności · ${
+            props.hasPlan ? "plan gotowy" : "brak planu"
+          }`}
+          icon={Activity}
+          title="Garmin"
+        />
+        <span
+          className={clsx(
+            "rounded-md px-2 py-1 text-xs font-semibold",
+            connected ? "bg-[#eaf7ed] text-[#236b35]" : "bg-[#f8fafb] text-[#5f6368]"
+          )}
+        >
+          {connected ? props.garmin.connection.mode ?? "OAuth" : "Brak"}
+        </span>
       </div>
       <button
-        className="focus-ring flex shrink-0 items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white"
+        className="focus-ring mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-3 py-2.5 text-sm font-semibold text-[#007f7a]"
         type="button"
-        onClick={props.onClick}
+        onClick={props.onOpen}
       >
-        {props.label}
-        <ChevronRight size={16} />
+        <Activity size={16} />
+        Otwórz integrację
       </button>
     </section>
   );
 }
 
-function Panel({
-  children,
-  description,
-  title,
-  icon: Icon
-}: {
+function ContextDrawer(props: {
   children: React.ReactNode;
-  description?: string;
+  open: boolean;
   title: string;
-  icon: typeof UserRound;
+  onClose: () => void;
 }) {
+  useEffect(() => {
+    if (!props.open) return;
+
+    const scrollY = window.scrollY;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    const bodyStyle = document.body.style;
+    const htmlStyle = document.documentElement.style;
+    const previousBody = {
+      left: bodyStyle.left,
+      overflow: bodyStyle.overflow,
+      paddingRight: bodyStyle.paddingRight,
+      position: bodyStyle.position,
+      right: bodyStyle.right,
+      top: bodyStyle.top,
+      width: bodyStyle.width
+    };
+    const previousHtmlOverflow = htmlStyle.overflow;
+
+    htmlStyle.overflow = "hidden";
+    bodyStyle.position = "fixed";
+    bodyStyle.top = `-${scrollY}px`;
+    bodyStyle.left = "0";
+    bodyStyle.right = "0";
+    bodyStyle.width = "100%";
+    bodyStyle.overflow = "hidden";
+    if (scrollbarWidth > 0) {
+      bodyStyle.paddingRight = `${scrollbarWidth}px`;
+    }
+
+    return () => {
+      htmlStyle.overflow = previousHtmlOverflow;
+      bodyStyle.position = previousBody.position;
+      bodyStyle.top = previousBody.top;
+      bodyStyle.left = previousBody.left;
+      bodyStyle.right = previousBody.right;
+      bodyStyle.width = previousBody.width;
+      bodyStyle.overflow = previousBody.overflow;
+      bodyStyle.paddingRight = previousBody.paddingRight;
+      window.scrollTo(0, scrollY);
+    };
+  }, [props.open]);
+
+  if (!props.open) return null;
+
   return (
-    <section className="min-w-0 rounded-xl border border-[#d9dee3] bg-white shadow-[0_1px_3px_rgba(22,35,33,0.04)]">
-      <div className="flex items-start gap-3 border-b border-[#e2e8eb] px-4 py-4 sm:px-5">
-        <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#edf7f6] text-[#007f7a]">
-          <Icon size={17} />
-        </span>
-        <div>
-          <h2 className="text-base font-semibold">{title}</h2>
-          {description ? (
-            <p className="mt-1 text-sm leading-5 text-[#5f6368]">{description}</p>
-          ) : null}
+    <div className="fixed inset-0 z-40">
+      <button
+        aria-label="Zamknij panel"
+        className="absolute inset-0 bg-[#123130]/20"
+        type="button"
+        onClick={props.onClose}
+      />
+      <aside className="thin-scrollbar absolute inset-y-0 right-0 w-full max-w-[560px] overflow-y-auto border-l border-[#d9dee3] bg-white shadow-2xl">
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[#e2e8eb] bg-white/95 px-4 py-4 backdrop-blur">
+          <h2 className="text-lg font-semibold">{props.title}</h2>
+          <button
+            aria-label="Zamknij panel"
+            className="focus-ring rounded-lg border border-[#d9dee3] p-2 text-[#5f6368] hover:text-[#202124]"
+            type="button"
+            onClick={props.onClose}
+          >
+            <X size={18} />
+          </button>
         </div>
-      </div>
-      <div className="p-4 sm:p-5">{children}</div>
-    </section>
+        <div className="p-4">{props.children}</div>
+      </aside>
+    </div>
   );
 }
 
-function ProfilePanel(props: {
+function ProfileDrawerContent(props: {
   busy: boolean;
   profile: Profile;
   raceDistance: number;
   raceResults: RaceResult[];
   raceTime: string;
+  zones: Zone[];
   setProfile: (profile: Profile) => void;
   setRaceDistance: (value: number) => void;
   setRaceTime: (value: string) => void;
+  setZones: (zones: Zone[]) => void;
   onAddRaceResult: (event: FormEvent<HTMLFormElement>) => void;
+  onDeleteRaceResult: (id: string) => void;
   onSaveProfile: () => void;
 }) {
-  return (
-    <Panel
-      title="Profil zawodnika"
-      description="Podstawowe dane pozwalają dopasować objętość i rodzaj bodźców."
-      icon={UserRound}
-    >
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label className="text-sm font-medium" htmlFor="level">
-          Poziom
-          <select
-            className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            id="level"
-            value={props.profile.level}
-            onChange={(event) =>
-              props.setProfile({ ...props.profile, level: event.target.value as Profile["level"] })
-            }
-          >
-            <option value="BEGINNER">Początkujący</option>
-            <option value="INTERMEDIATE">Średniozaawansowany</option>
-            <option value="ADVANCED">Zaawansowany</option>
-          </select>
-        </label>
-        <label className="text-sm font-medium" htmlFor="volume">
-          Tygodniowy kilometraż
-          <input
-            className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            id="volume"
-            min={0}
-            type="number"
-            value={props.profile.weeklyVolumeKm ?? 0}
-            onChange={(event) =>
-              props.setProfile({
-                ...props.profile,
-                weeklyVolumeKm: Number(event.target.value)
-              })
-            }
-          />
-        </label>
-        <label className="text-sm font-medium sm:col-span-2" htmlFor="target">
-          Cel startowy
-          <input
-            className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            id="target"
-            value={props.profile.targetRace ?? ""}
-            onChange={(event) =>
-              props.setProfile({ ...props.profile, targetRace: event.target.value })
-            }
-          />
-        </label>
-        <label className="text-sm font-medium sm:col-span-2" htmlFor="notes">
-          Notatki
-          <textarea
-            className="focus-ring mt-2 min-h-20 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            id="notes"
-            value={props.profile.notes ?? ""}
-            onChange={(event) => props.setProfile({ ...props.profile, notes: event.target.value })}
-          />
-        </label>
-        <button
-          className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white sm:col-span-2"
-          disabled={props.busy}
-          type="button"
-          onClick={props.onSaveProfile}
-        >
-          <Save size={16} />
-          Zapisz profil
-        </button>
-      </div>
+  function updateZone(index: number, patch: Partial<Zone>) {
+    props.setZones(
+      props.zones.map((zone, zoneIndex) => (zoneIndex === index ? { ...zone, ...patch } : zone))
+    );
+  }
 
-      <form className="mt-6 border-t border-[#e2e8eb] pt-5" onSubmit={props.onAddRaceResult}>
-        <h3 className="text-sm font-semibold">Wynik odniesienia</h3>
-        <p className="mt-1 text-sm leading-5 text-[#5f6368]">
-          Dodaj ostatni start, aby coach mógł oceniać kierunek formy.
-        </p>
+  return (
+    <div className="space-y-5">
+      <section className="rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-3">
+        <SectionHeading
+          description="Dane używane przez generator i rekomendacje coacha."
+          icon={UserRound}
+          title="Dane zawodnika"
+        />
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <label className="text-sm font-medium" htmlFor="level">
+            Poziom
+            <select
+              className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] bg-white px-3 py-2.5 text-sm"
+              id="level"
+              value={props.profile.level}
+              onChange={(event) =>
+                props.setProfile({
+                  ...props.profile,
+                  level: event.target.value as Profile["level"]
+                })
+              }
+            >
+              <option value="BEGINNER">Początkujący</option>
+              <option value="INTERMEDIATE">Średniozaawansowany</option>
+              <option value="ADVANCED">Zaawansowany</option>
+            </select>
+          </label>
+          <label className="text-sm font-medium" htmlFor="volume">
+            Tygodniowy kilometraż
+            <input
+              className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] bg-white px-3 py-2.5 text-sm"
+              id="volume"
+              min={0}
+              type="number"
+              value={props.profile.weeklyVolumeKm ?? 0}
+              onChange={(event) =>
+                props.setProfile({
+                  ...props.profile,
+                  weeklyVolumeKm: Number(event.target.value)
+                })
+              }
+            />
+          </label>
+          <label className="text-sm font-medium sm:col-span-2" htmlFor="target">
+            Cel startowy
+            <input
+              className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] bg-white px-3 py-2.5 text-sm"
+              id="target"
+              value={props.profile.targetRace ?? ""}
+              onChange={(event) =>
+                props.setProfile({ ...props.profile, targetRace: event.target.value })
+              }
+            />
+          </label>
+          <label className="text-sm font-medium sm:col-span-2" htmlFor="notes">
+            Notatki
+            <textarea
+              className="focus-ring mt-2 min-h-20 w-full rounded-lg border border-[#c7cdd2] bg-white px-3 py-2.5 text-sm"
+              id="notes"
+              value={props.profile.notes ?? ""}
+              onChange={(event) => props.setProfile({ ...props.profile, notes: event.target.value })}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-[#e2e8eb] bg-white p-3">
+        <SectionHeading
+          description="Progi tempa i tętna używane w strukturze treningów."
+          icon={SlidersHorizontal}
+          title="Strefy intensywności"
+        />
+        <div className="mt-4 grid gap-5">
+          {(["PACE", "HEART_RATE"] as const).map((type) => (
+            <fieldset className="rounded-lg border border-[#e2e8eb] p-3" key={type}>
+              <legend className="px-2 text-sm font-semibold">
+                {type === "PACE" ? "Tempo" : "Tętno"}
+                <span className="ml-1 text-xs font-normal text-[#5f6368]">
+                  ({type === "PACE" ? "min/km" : "bpm"})
+                </span>
+              </legend>
+              <div className="mb-2 grid grid-cols-[44px_minmax(0,1fr)_minmax(0,1fr)] gap-2 px-1 text-xs text-[#5f6368] sm:grid-cols-[52px_minmax(96px,1fr)_minmax(96px,1fr)_64px]">
+                <span>Strefa</span>
+                <span>Od</span>
+                <span>Do</span>
+                <span className="hidden sm:block">Jedn.</span>
+              </div>
+              <div className="space-y-2">
+                {props.zones.map((zone, index) =>
+                  zone.type !== type ? null : (
+                    <div
+                      className="grid grid-cols-[44px_minmax(0,1fr)_minmax(0,1fr)] gap-2 text-sm sm:grid-cols-[52px_minmax(96px,1fr)_minmax(96px,1fr)_64px]"
+                      key={`${zone.type}-${zone.name}-${index}`}
+                    >
+                      <span className="rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs font-semibold text-[#5f6368]">
+                        {zone.name}
+                      </span>
+                      {type === "PACE" ? (
+                        <PaceInput
+                          ariaLabel={`Tempo ${zone.name} od`}
+                          value={zone.minValue}
+                          onChange={(value) => updateZone(index, { minValue: value })}
+                        />
+                      ) : (
+                        <input
+                          aria-label={`Tętno ${zone.name} od`}
+                          className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
+                          step="1"
+                          type="number"
+                          value={zone.minValue}
+                          onChange={(event) =>
+                            updateZone(index, { minValue: Number(event.target.value) })
+                          }
+                        />
+                      )}
+                      {type === "PACE" ? (
+                        <PaceInput
+                          ariaLabel={`Tempo ${zone.name} do`}
+                          value={zone.maxValue}
+                          onChange={(value) => updateZone(index, { maxValue: value })}
+                        />
+                      ) : (
+                        <input
+                          aria-label={`Tętno ${zone.name} do`}
+                          className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
+                          step="1"
+                          type="number"
+                          value={zone.maxValue}
+                          onChange={(event) =>
+                            updateZone(index, { maxValue: Number(event.target.value) })
+                          }
+                        />
+                      )}
+                      <span className="hidden rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs text-[#5f6368] sm:block">
+                        {zone.unit}
+                      </span>
+                    </div>
+                  )
+                )}
+              </div>
+            </fieldset>
+          ))}
+        </div>
+      </section>
+
+      <button
+        className="focus-ring flex w-full items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-3 text-sm font-semibold text-white"
+        disabled={props.busy}
+        type="button"
+        onClick={props.onSaveProfile}
+      >
+        <Save size={16} />
+        Zapisz profil
+      </button>
+
+      <form className="rounded-lg border border-[#e2e8eb] bg-white p-3" onSubmit={props.onAddRaceResult}>
+        <SectionHeading
+          description="Pomaga oceniać postęp lub regres w rekomendacjach."
+          icon={TrendingUp}
+          title="Wyniki odniesienia"
+        />
         <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1.25fr_auto] sm:items-end">
           <label className="text-xs font-medium text-[#5f6368]">
             Dystans (km)
@@ -1764,120 +2281,30 @@ function ProfilePanel(props: {
           </button>
         </div>
         <div className="mt-4 space-y-2">
-          {props.raceResults.slice(0, 4).map((result) => (
+          {props.raceResults.slice(0, 6).map((result) => (
             <div
               className="flex items-center justify-between rounded-lg bg-[#f8fafb] px-3 py-2.5 text-sm"
               key={result.id}
             >
               <span>{result.distanceKm} km</span>
-              <span className="font-mono text-xs">{secondsToTime(result.resultSeconds)}</span>
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-xs">{secondsToTime(result.resultSeconds)}</span>
+                <button
+                  aria-label={`Usuń wynik ${result.distanceKm} km`}
+                  className="focus-ring rounded-md p-1.5 text-[#8a1f11] transition hover:bg-[#fce8e6] disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={props.busy}
+                  title="Usuń wynik"
+                  type="button"
+                  onClick={() => props.onDeleteRaceResult(result.id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
             </div>
           ))}
         </div>
       </form>
-    </Panel>
-  );
-}
-
-function ZonesPanel(props: {
-  busy: boolean;
-  zones: Zone[];
-  setZones: (zones: Zone[]) => void;
-  onSaveZones: () => void;
-}) {
-  function updateZone(index: number, patch: Partial<Zone>) {
-    props.setZones(
-      props.zones.map((zone, zoneIndex) => (zoneIndex === index ? { ...zone, ...patch } : zone))
-    );
-  }
-
-  return (
-    <Panel
-      title="Strefy intensywności"
-      description="Utrzymuj osobno progi tempa i tętna używane w treningach."
-      icon={Activity}
-    >
-      <div className="grid gap-5 2xl:grid-cols-2">
-        {(["PACE", "HEART_RATE"] as const).map((type) => (
-          <fieldset className="min-w-0 rounded-xl border border-[#e2e8eb] p-3" key={type}>
-            <legend className="px-2 text-sm font-semibold">
-              {type === "PACE" ? "Tempo" : "Tętno"}
-              <span className="ml-1 text-xs font-normal text-[#5f6368]">
-                ({type === "PACE" ? "min/km" : "bpm"})
-              </span>
-            </legend>
-            <div className="mb-2 grid grid-cols-[44px_minmax(0,1fr)_minmax(0,1fr)] gap-2 px-1 text-xs text-[#5f6368] sm:grid-cols-[52px_minmax(96px,1fr)_minmax(96px,1fr)_72px]">
-              <span>Strefa</span>
-              <span>Od</span>
-              <span>Do</span>
-              <span className="hidden sm:block">Jedn.</span>
-            </div>
-            <div className="space-y-2">
-              {props.zones.map((zone, index) =>
-                zone.type !== type ? null : (
-                  <div
-                    className="grid grid-cols-[44px_minmax(0,1fr)_minmax(0,1fr)] gap-2 text-sm sm:grid-cols-[52px_minmax(96px,1fr)_minmax(96px,1fr)_72px]"
-                    key={`${zone.type}-${zone.name}-${index}`}
-                  >
-                    <span className="rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs font-semibold text-[#5f6368]">
-                      {zone.name}
-                    </span>
-                    {type === "PACE" ? (
-                      <PaceInput
-                        ariaLabel={`Tempo ${zone.name} od`}
-                        value={zone.minValue}
-                        onChange={(value) => updateZone(index, { minValue: value })}
-                      />
-                    ) : (
-                      <input
-                        aria-label={`Tętno ${zone.name} od`}
-                        className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
-                        step="1"
-                        type="number"
-                        value={zone.minValue}
-                        onChange={(event) =>
-                          updateZone(index, { minValue: Number(event.target.value) })
-                        }
-                      />
-                    )}
-                    {type === "PACE" ? (
-                      <PaceInput
-                        ariaLabel={`Tempo ${zone.name} do`}
-                        value={zone.maxValue}
-                        onChange={(value) => updateZone(index, { maxValue: value })}
-                      />
-                    ) : (
-                      <input
-                        aria-label={`Tętno ${zone.name} do`}
-                        className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
-                        step="1"
-                        type="number"
-                        value={zone.maxValue}
-                        onChange={(event) =>
-                          updateZone(index, { maxValue: Number(event.target.value) })
-                        }
-                      />
-                    )}
-                    <span className="hidden rounded-lg bg-[#f8fafb] px-2 py-2.5 text-xs text-[#5f6368] sm:block">
-                      {zone.unit}
-                    </span>
-                  </div>
-                )
-              )}
-            </div>
-          </fieldset>
-        ))}
-      </div>
-      <button
-        className="focus-ring mt-5 flex w-full items-center justify-center gap-2 rounded-lg border border-[#007f7a] px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
-        disabled={props.busy}
-        type="button"
-        onClick={props.onSaveZones}
-      >
-        <ShieldCheck size={16} />
-        Zapisz strefy
-      </button>
-    </Panel>
+    </div>
   );
 }
 
@@ -1886,26 +2313,27 @@ function PaceInput(props: {
   value: number;
   onChange: (value: number) => void;
 }) {
-  const formattedValue = formatPaceSeconds(props.value);
+  const [draft, setDraft] = useState<string | null>(null);
+  const displayValue = draft ?? formatPaceSeconds(props.value);
+
+  function commit() {
+    const seconds = parsePaceSeconds(displayValue);
+    if (seconds !== null) {
+      props.onChange(seconds);
+      setDraft(null);
+    } else {
+      setDraft(null);
+    }
+  }
 
   return (
     <input
       aria-label={props.ariaLabel}
-      className="focus-ring w-full min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 font-mono tabular-nums"
-      defaultValue={formattedValue}
+      className="focus-ring min-w-0 rounded-lg border border-[#c7cdd2] px-2 py-2 text-right tabular-nums"
       inputMode="numeric"
-      key={`${props.ariaLabel}-${formattedValue}`}
-      placeholder="5:00"
-      type="text"
-      onBlur={(event) => {
-        const nextValue = parsePaceSeconds(event.currentTarget.value);
-        if (nextValue !== null) {
-          props.onChange(nextValue);
-          event.currentTarget.value = formatPaceSeconds(nextValue);
-        } else {
-          event.currentTarget.value = formattedValue;
-        }
-      }}
+      value={displayValue}
+      onBlur={commit}
+      onChange={(event) => setDraft(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === "Enter") {
           event.currentTarget.blur();
@@ -1915,407 +2343,358 @@ function PaceInput(props: {
   );
 }
 
-function WizardPanel(props: {
+function WorkoutDrawerContent(props: {
   busy: boolean;
-  goals: GoalAllocation;
-  goalSum: number;
-  insights: CoachInsights | null;
-  workoutsCount: number;
-  setGoals: (goals: GoalAllocation) => void;
-  setWorkoutsCount: (value: number) => void;
-  onApplyRecommendation: () => void;
-  onGenerateRecommendation: () => void;
-}) {
-  const recommendation = props.insights?.recommendation;
-
-  return (
-    <Panel
-      title="Parametry planu"
-      description="Najprościej: użyj rekomendacji coacha. Ręcznie zmieniaj tylko wtedy, gdy chcesz świadomie skorygować tydzień."
-      icon={Target}
-    >
-      {recommendation ? (
-        <div className="rounded-lg border border-[#b9ddda] bg-[#effbf9] p-4">
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px] lg:items-start">
-            <div>
-              <div className="text-sm font-semibold text-[#123130]">{recommendation.title}</div>
-              <p className="mt-1 text-sm leading-6 text-[#315955]">
-                {recommendation.rationale}
-              </p>
-              <p className="mt-2 text-xs font-medium uppercase tracking-[0.12em] text-[#007f7a]">
-                Fokus tygodnia
-              </p>
-              <p className="mt-1 text-sm leading-6 text-[#315955]">
-                {recommendation.planningFocus}
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <Metric label="Treningi" value={`${recommendation.nextWorkoutsCount}`} />
-              <Metric label="Minuty" value={`${recommendation.weeklyMinutesTarget}`} />
-            </div>
-          </div>
-          <p className="mt-4 text-xs leading-5 text-[#456461]">
-            Wstaw rekomendację do pól, jeśli chcesz ją sprawdzić. Główna akcja wygeneruje
-            tydzień od razu z tym limitem.
-          </p>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            <button
-              className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
-              disabled={props.busy}
-              type="button"
-              onClick={props.onApplyRecommendation}
-            >
-              <Check size={16} />
-              Wstaw do pól
-            </button>
-            <button
-              className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-4 py-2.5 text-sm font-semibold text-white"
-              disabled={props.busy}
-              type="button"
-              onClick={props.onGenerateRecommendation}
-            >
-              <Wand2 size={16} />
-              Generuj z rekomendacji
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      <div
-        className={clsx(
-          "grid gap-5 md:grid-cols-[200px_1fr] md:items-start",
-          recommendation && "mt-5 border-t border-[#e2e8eb] pt-5"
-        )}
-      >
-        <label className="block text-sm font-medium">
-          Liczba treningów
-          <input
-            className="focus-ring mt-2 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            max={7}
-            min={1}
-            type="number"
-            value={props.workoutsCount}
-            onChange={(event) => props.setWorkoutsCount(Number(event.target.value))}
-          />
-        </label>
-        <fieldset className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-          <legend className="sr-only">Rozkład celów w procentach</legend>
-          {(Object.keys(goalLabels) as Array<keyof GoalAllocation>).map((key) => (
-            <label className="block text-xs font-medium text-[#5f6368]" key={key}>
-              {goalLabels[key]}
-              <input
-                className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-2 py-2.5 text-sm text-[#202124]"
-                min={0}
-                max={100}
-                type="number"
-                value={props.goals[key]}
-                onChange={(event) =>
-                  props.setGoals({
-                    ...props.goals,
-                    [key]: Number(event.target.value)
-                  })
-                }
-              />
-            </label>
-          ))}
-        </fieldset>
-      </div>
-      <div
-        className={clsx(
-          "mt-4 flex items-center justify-between rounded-lg px-3 py-2.5 text-sm",
-          props.goalSum === 100 ? "bg-[#edf7f6]" : "bg-[#fff7f5]",
-          props.goalSum === 100 ? "text-[#2f8d46]" : "text-[#c24135]"
-        )}
-      >
-        <span>Suma celów: {props.goalSum}%</span>
-        <span className="font-semibold">
-          {props.goalSum === 100 ? "Gotowe do generowania" : "Wymagane 100%"}
-        </span>
-      </div>
-    </Panel>
-  );
-}
-
-function CalendarPanel(props: {
-  groupedWorkouts: Map<string, Workout[]>;
-  selectedWorkoutId: string | null;
+  canSendToGarmin: boolean;
+  garminActivity: GarminActivity | null;
+  workout: Workout | null;
   weekDates: string[];
+  onAccept: (id: string) => void;
+  onChangeStatus: (id: string, status: WorkoutStatus) => void;
+  onExport: (id: string) => void;
   onMoveWorkout: (workoutId: string, date: string) => void;
-  onSelectWorkout: (workout: Workout) => void;
+  onPatch: (id: string, payload: Partial<Workout>) => Promise<Workout>;
+  onSendToGarmin: (id: string) => void;
 }) {
-  return (
-    <Panel
-      title="Kalendarz tygodniowy"
-      description="Wybierz jednostkę, aby ją edytować. Na komputerze możesz przeciągać treningi między dniami."
-      icon={CalendarDays}
-    >
-      <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-7">
-        {props.weekDates.map((date, index) => {
-          const dayWorkouts = props.groupedWorkouts.get(date) ?? [];
+  const [draft, setDraft] = useState<Workout | null>(props.workout);
 
-          return (
-            <div
-              className="rounded-xl border border-[#e2e8eb] bg-[#f8fafb] p-2.5 2xl:min-h-[420px]"
-              data-testid={`day-${date}`}
-              key={date}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                const workoutId = event.dataTransfer.getData("text/plain");
-                if (workoutId) {
-                  void props.onMoveWorkout(workoutId, date);
-                }
-              }}
-            >
-              <div className="flex items-center justify-between px-1 pb-2">
-                <div className="flex items-baseline gap-2 2xl:block">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-[#5f6368]">
-                    {dayLabels[index]}
-                  </div>
-                  <div className="text-sm font-semibold">{date.slice(5)}</div>
-                </div>
-                <Move size={15} className="hidden text-[#9aa0a6] 2xl:block" />
-              </div>
-              <div className="space-y-2">
-                {dayWorkouts.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-[#d9dee3] bg-white/60 px-3 py-4 text-center text-xs text-[#7b8286]">
-                    Odpoczynek
-                  </div>
-                ) : null}
-                {dayWorkouts.map((workout) => (
-                  <button
-                    className={clsx(
-                      "focus-ring w-full rounded-lg border bg-white p-3 text-left text-sm transition hover:border-[#007f7a]",
-                      props.selectedWorkoutId === workout.id
-                        ? "border-[#007f7a] shadow-[inset_3px_0_0_#007f7a]"
-                        : "border-[#d9dee3]"
-                    )}
-                    data-testid={`workout-${workout.id}`}
-                    draggable
-                    key={workout.id}
-                    type="button"
-                    onClick={() => props.onSelectWorkout(workout)}
-                    onDragStart={(event) => {
-                      event.dataTransfer.setData("text/plain", workout.id);
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="font-semibold leading-5">{workout.title}</span>
-                      <span
-                        className={clsx(
-                          "shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
-                          workout.status === "EXPORTED" || workout.status === "DONE"
-                            ? "bg-[#eaf7ed] text-[#2f8d46]"
-                            : workout.status === "SKIPPED"
-                              ? "bg-[#fff4ef] text-[#c24135]"
-                              : "bg-[#edf7f6] text-[#007f7a]"
-                        )}
-                      >
-                        {statusLabels[workout.status]}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#5f6368]">
-                      <span>{workout.durationMin} min</span>
-                      <span>·</span>
-                      <span>{workout.zoneName}</span>
-                      <span>·</span>
-                      <span>{workout.goal}</span>
-                      {workout.segments?.[0] ? (
-                        <>
-                          <span>Â·</span>
-                          <span>
-                            {formatPaceRange(workout.segments[0])} /{" "}
-                            {formatHeartRateRange(workout.segments[0])}
-                          </span>
-                        </>
-                      ) : null}
-                    </div>
-                    <p className="mt-2 line-clamp-2 text-xs leading-5 text-[#3c4043] 2xl:line-clamp-3">
-                      {workout.structure}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Panel>
-  );
-}
+  const garminExportDisabledReason = !draft
+    ? null
+    : props.busy
+      ? "Poczekaj na zakończenie bieżącej operacji."
+      : !props.canSendToGarmin
+        ? "Połącz Garmin i upewnij się, że eksport treningów jest dostępny."
+        : draft.status === "DONE" || draft.status === "SKIPPED"
+          ? "Garmin przyjmuje tylko treningi zaplanowane lub zaakceptowane."
+          : null;
+  const garminExportDisabled = Boolean(garminExportDisabledReason);
 
-function CoachPanel(props: {
-  busy: boolean;
-  insights: CoachInsights | null;
-  onApplyRecommendation: () => void;
-  onGenerateRecommendation: () => void;
-}) {
-  if (!props.insights) {
+  if (!draft) {
     return (
-      <Panel
-        title="Coach i rekomendacje"
-        description="Ocena pojawi się po zapisaniu danych i utworzeniu planu."
-        icon={Bot}
-      >
-        <p className="text-sm text-[#5f6368]">
-          Rekomendacje pojawią się po wczytaniu planu, wyników i statusów treningów.
-        </p>
-      </Panel>
+      <div className="rounded-lg bg-[#f8fafb] p-4 text-sm leading-6 text-[#5f6368]">
+        Wybierz trening z kalendarza, aby edytować szczegóły albo rozliczyć wykonanie.
+      </div>
     );
   }
 
-  const recommendation = props.insights.recommendation;
-  const trendIcon =
-    props.insights.raceTrend.state === "regression" ? (
-      <TrendingDown size={16} className="text-[#c24135]" />
-    ) : (
-      <TrendingUp size={16} className="text-[#2f8d46]" />
-    );
-  const toneClass =
-    recommendation.status === "deload" || recommendation.status === "watch"
-      ? "border-[#f3b29f] bg-[#fff7f5]"
-      : recommendation.status === "progress"
-        ? "border-[#9bd8ad] bg-[#f0faf2]"
-        : "border-[#b9ddda] bg-[#effbf9]";
+  const segments = draft.segments ?? [];
+  const selectedWorkoutDate = normalizeDate(draft.date);
+  const updateDraftSegment = (index: number, patch: Partial<WorkoutSegment>) => {
+    setDraft({
+      ...draft,
+      segments: segments.map((segment, segmentIndex) =>
+        segmentIndex === index ? { ...segment, ...patch } : segment
+      )
+    });
+  };
+  const moveSelectedWorkout = (nextDate: string) => {
+    setDraft({ ...draft, date: nextDate });
+    props.onMoveWorkout(draft.id, nextDate);
+  };
 
   return (
-    <Panel
-      title="Coach i rekomendacje"
-      description="Sprawdź realizację i zastosuj proponowane obciążenie kolejnego tygodnia."
-      icon={Bot}
-    >
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-        <Metric label="Realizacja tyg." value={`${props.insights.currentWeek.completionRate}%`} />
-        <Metric
-          label="Czas wykonany"
-          value={`${props.insights.currentWeek.completedMinutes}/${props.insights.currentWeek.plannedMinutes} min`}
-        />
-        <Metric
-          label="4 tygodnie"
-          value={
-            props.insights.rollingFourWeeks.adherenceRate === null
-              ? "brak"
-              : `${props.insights.rollingFourWeeks.adherenceRate}%`
-          }
-        />
-        <Metric label="Auto plan" value={`${recommendation.nextWorkoutsCount} tr.`} />
-        <Metric label="Cel czasu" value={`${recommendation.weeklyMinutesTarget} min`} />
-      </div>
-
-      <div className={clsx("mt-4 rounded-md border p-3", toneClass)}>
+    <div className="space-y-5">
+      <div className="rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-3">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold">{recommendation.title}</div>
-            <p className="mt-1 text-sm leading-5 text-[#3c4043]">{recommendation.rationale}</p>
+            <p className="text-base font-semibold">{draft.title}</p>
+            <p className="mt-1 text-xs text-[#5f6368]">
+              {normalizeDate(draft.date)} · {draft.durationMin} min · {draft.zoneName}
+            </p>
           </div>
-          <span className="shrink-0 rounded-md bg-white/80 px-2 py-1 text-xs font-semibold text-[#3c4043]">
-            {recommendation.status}
+          <span className={clsx("rounded-md px-2 py-1 text-xs font-semibold", statusTone[draft.status])}>
+            {statusLabels[draft.status]}
           </span>
         </div>
-
-        <div className="mt-3 flex items-start gap-2 rounded-md bg-white/70 p-2 text-sm text-[#3c4043]">
-          {trendIcon}
-          <div>
-            <div className="font-semibold">{props.insights.raceTrend.label}</div>
-            <div className="text-xs leading-5 text-[#5f6368]">
-              {props.insights.raceTrend.detail}
+        {props.garminActivity ? (
+          <div className="mt-3 rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-[#123130]">Garmin wykonanie</div>
+                <div className="mt-1 text-xs text-[#456461]">
+                  {formatGarminActivityDate(props.garminActivity)} · {props.garminActivity.title}
+                </div>
+              </div>
+              <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
+                {formatDistanceMeters(props.garminActivity.distanceMeters)}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <Metric label="Czas" value={formatDurationShort(props.garminActivity.durationSeconds)} />
+              <Metric
+                label="Tempo"
+                value={
+                  props.garminActivity.avgPaceSecondsPerKm
+                    ? `${formatPaceSeconds(props.garminActivity.avgPaceSecondsPerKm)}/km`
+                    : "-"
+                }
+              />
+              <Metric label="HR" value={props.garminActivity.avgHeartRate ?? "-"} />
             </div>
           </div>
-        </div>
+        ) : null}
+      </div>
 
-        <div className="mt-3 rounded-md bg-white/70 p-2 text-sm leading-5 text-[#3c4043]">
-          <span className="font-semibold">Fokus: </span>
-          {recommendation.planningFocus}
+      <section className="rounded-lg border border-[#e2e8eb] bg-white p-3">
+        <SectionHeading
+          description="Zmiany zapisują się w aktualnym mikrocyklu tygodniowym."
+          icon={Save}
+          title="Edycja treningu"
+        />
+        <div className="mt-4 grid gap-3">
+          <label className="text-sm font-medium">
+            Nazwa
+            <input
+              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+              value={draft.title}
+              onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-sm font-medium">
+              Data
+              <input
+                className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+                type="date"
+                value={normalizeDate(draft.date)}
+                onChange={(event) => setDraft({ ...draft, date: event.target.value })}
+              />
+            </label>
+            <label className="text-sm font-medium">
+              Minuty
+              <input
+                className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+                min={10}
+                type="number"
+                value={draft.durationMin}
+                onChange={(event) => setDraft({ ...draft, durationMin: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+          <label className="text-sm font-medium">
+            Przenieś na dzień
+            <select
+              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+              disabled={props.busy}
+              value={selectedWorkoutDate}
+              onChange={(event) => moveSelectedWorkout(event.currentTarget.value)}
+            >
+              {props.weekDates.map((date, index) => (
+                <option key={date} value={date}>
+                  {dayLabels[index]} {date.slice(5)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-sm font-medium">
+              Cel
+              <input
+                className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+                value={draft.goal}
+                onChange={(event) => setDraft({ ...draft, goal: event.target.value })}
+              />
+            </label>
+            <label className="text-sm font-medium">
+              Strefa
+              <input
+                className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+                value={draft.zoneName}
+                onChange={(event) => setDraft({ ...draft, zoneName: event.target.value })}
+              />
+            </label>
+          </div>
+          <label className="text-sm font-medium">
+            Intensywność
+            <input
+              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+              value={draft.intensity}
+              onChange={(event) => setDraft({ ...draft, intensity: event.target.value })}
+            />
+          </label>
+          <label className="text-sm font-medium">
+            Struktura
+            <textarea
+              className="focus-ring mt-1 min-h-28 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
+              value={draft.structure}
+              onChange={(event) => setDraft({ ...draft, structure: event.target.value })}
+            />
+          </label>
         </div>
+      </section>
 
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+      <section className="rounded-lg border border-[#e2e8eb] bg-white p-3">
+        <div className="flex items-center justify-between gap-3">
+          <SectionHeading
+            description="Źródło prawdy dla zakresów min/km i bpm."
+            icon={Activity}
+            title="Segmenty"
+          />
+          <span className="rounded-md bg-[#f8fafb] px-2 py-1 text-xs font-semibold text-[#007f7a]">
+            {segments.reduce((sum, segment) => sum + segment.durationMin, 0)} min
+          </span>
+        </div>
+        {segments.length === 0 ? (
+          <div className="mt-3 rounded-md border border-dashed border-[#c7cdd2] bg-[#f8fafb] p-3 text-sm text-[#5f6368]">
+            Ten trening nie ma jeszcze segmentów. Eksporty użyją opisu tekstowego.
+          </div>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {segments.map((segment, index) => (
+              <div
+                className="grid gap-2 rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-3 sm:grid-cols-2"
+                key={segment.id ?? `${segment.label}-${index}`}
+              >
+                <label className="text-xs font-medium text-[#5f6368] sm:col-span-2">
+                  Segment
+                  <input
+                    className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                    value={segment.label}
+                    onChange={(event) => updateDraftSegment(index, { label: event.target.value })}
+                  />
+                </label>
+                <label className="text-xs font-medium text-[#5f6368]">
+                  Min
+                  <input
+                    className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                    min={1}
+                    type="number"
+                    value={segment.durationMin}
+                    onChange={(event) =>
+                      updateDraftSegment(index, { durationMin: Number(event.target.value) })
+                    }
+                  />
+                </label>
+                <label className="text-xs font-medium text-[#5f6368]">
+                  Strefa
+                  <input
+                    className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                    value={segment.zoneName}
+                    onChange={(event) => updateDraftSegment(index, { zoneName: event.target.value })}
+                  />
+                </label>
+                <label className="text-xs font-medium text-[#5f6368]">
+                  Tempo min/max
+                  <div className="mt-1 grid grid-cols-2 gap-1">
+                    <PaceInput
+                      ariaLabel={`Tempo minimalne segmentu ${index + 1}`}
+                      value={segment.paceMinSecPerKm}
+                      onChange={(value) => updateDraftSegment(index, { paceMinSecPerKm: value })}
+                    />
+                    <PaceInput
+                      ariaLabel={`Tempo maksymalne segmentu ${index + 1}`}
+                      value={segment.paceMaxSecPerKm}
+                      onChange={(value) => updateDraftSegment(index, { paceMaxSecPerKm: value })}
+                    />
+                  </div>
+                  <span className="mt-1 block text-[11px]">{formatPaceRange(segment)}</span>
+                </label>
+                <label className="text-xs font-medium text-[#5f6368]">
+                  HR min/max
+                  <div className="mt-1 grid grid-cols-2 gap-1">
+                    <input
+                      className="focus-ring w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                      min={1}
+                      type="number"
+                      value={segment.heartRateMinBpm}
+                      onChange={(event) =>
+                        updateDraftSegment(index, {
+                          heartRateMinBpm: Number(event.target.value)
+                        })
+                      }
+                    />
+                    <input
+                      className="focus-ring w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                      min={1}
+                      type="number"
+                      value={segment.heartRateMaxBpm}
+                      onChange={(event) =>
+                        updateDraftSegment(index, {
+                          heartRateMaxBpm: Number(event.target.value)
+                        })
+                      }
+                    />
+                  </div>
+                  <span className="mt-1 block text-[11px]">{formatHeartRateRange(segment)}</span>
+                </label>
+                <label className="text-xs font-medium text-[#5f6368] sm:col-span-2">
+                  Intensywność
+                  <input
+                    className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] bg-white px-2 py-2 text-sm text-[#202124]"
+                    value={segment.intensity}
+                    onChange={(event) => updateDraftSegment(index, { intensity: event.target.value })}
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <div className="grid gap-2">
+        <button
+          className="focus-ring flex w-full items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
+          disabled={props.busy}
+          type="button"
+          onClick={() => void props.onPatch(draft.id, draft)}
+        >
+          <Save size={16} />
+          Zapisz zmiany
+        </button>
+        <div className="grid gap-2 sm:grid-cols-3">
           <button
-            className="focus-ring flex items-center justify-center gap-2 rounded-md border border-[#007f7a] bg-white px-3 py-2 text-sm font-semibold text-[#007f7a]"
+            className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-3 py-2.5 text-sm font-semibold text-white"
             disabled={props.busy}
             type="button"
-            onClick={props.onApplyRecommendation}
+            onClick={() => void props.onAccept(draft.id)}
           >
             <Check size={16} />
-            Zastosuj rekomendacje
+            Akceptuj
           </button>
-          <button
-            className="focus-ring flex items-center justify-center gap-2 rounded-md bg-[#007f7a] px-3 py-2 text-sm font-semibold text-white"
-            disabled={props.busy}
-            type="button"
-            onClick={props.onGenerateRecommendation}
-          >
-            <Wand2 size={16} />
-            Generuj automatycznie
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-2 md:grid-cols-2">
-        {(Object.keys(goalLabels) as Array<keyof GoalAllocation>).map((key) => (
-          <div key={key}>
-            <div className="mb-1 flex justify-between text-xs text-[#5f6368]">
-              <span>{goalLabels[key]}</span>
-              <span>{recommendation.suggestedGoals[key]}%</span>
-            </div>
-            <div className="h-2 rounded-full bg-[#edf0f2]">
-              <div
-                className="h-2 rounded-full bg-[#e6634f]"
-                style={{ width: `${recommendation.suggestedGoals[key]}%` }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {props.insights.alerts.length > 0 ? (
-        <div className="mt-4 space-y-2">
-          {props.insights.alerts.slice(0, 4).map((alert) => (
-            <div
-              className={clsx(
-                "rounded-md px-3 py-2 text-xs leading-5",
-                alert.level === "danger"
-                  ? "bg-[#fff4ef] text-[#9f2f24]"
-                  : alert.level === "success"
-                    ? "bg-[#eaf7ed] text-[#236b35]"
-                    : "bg-[#fff9e6] text-[#705a00]"
-              )}
-              key={alert.text}
+          {(["DONE", "SKIPPED"] as WorkoutStatus[]).map((workoutStatus) => (
+            <button
+              className="focus-ring rounded-lg bg-[#f8fafb] px-3 py-2.5 text-sm font-semibold text-[#3c4043]"
+              disabled={props.busy}
+              key={workoutStatus}
+              type="button"
+              onClick={() => void props.onChangeStatus(draft.id, workoutStatus)}
             >
-              {alert.text}
-            </div>
+              {workoutStatus === "DONE" ? "Oznacz wykonany" : "Oznacz pominięty"}
+            </button>
           ))}
         </div>
-      ) : null}
-
-      <div className="mt-4 grid gap-2 md:grid-cols-3">
-        {recommendation.actions.slice(0, 3).map((action) => (
-          <div
-            className="rounded-md border border-[#e2e8eb] bg-[#f8fafb] px-3 py-2 text-xs leading-5 text-[#3c4043]"
-            key={action}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <button
+            className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
+            disabled={props.busy}
+            type="button"
+            onClick={() => void props.onExport(draft.id)}
           >
-            {action}
-          </div>
-        ))}
+            <Download size={16} />
+            TrainingPeaks
+          </button>
+          <button
+            aria-describedby={garminExportDisabledReason ? "garmin-workout-disabled" : undefined}
+            className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
+            disabled={garminExportDisabled}
+            type="button"
+            onClick={() => void props.onSendToGarmin(draft.id)}
+          >
+            <UploadCloud size={16} />
+            Garmin
+          </button>
+        </div>
+        {garminExportDisabledReason ? (
+          <p id="garmin-workout-disabled" className="text-xs leading-5 text-[#5f6368]">
+            Garmin: {garminExportDisabledReason}
+          </p>
+        ) : null}
       </div>
-    </Panel>
+    </div>
   );
 }
 
-function formatDistanceMeters(value: number | null) {
-  if (value === null) return "-";
-  return `${(value / 1000).toFixed(2)} km`;
-}
-
-function formatDurationShort(totalSeconds: number) {
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.round((totalSeconds % 3600) / 60);
-  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-}
-
-function formatGarminActivityDate(activity: GarminActivity) {
-  return activity.localDate ?? normalizeDate(activity.startTime);
-}
-
-function GarminPanel(props: {
+function GarminDrawerContent(props: {
   busy: boolean;
   garmin: GarminDashboard;
   hasPlan: boolean;
@@ -2378,40 +2757,31 @@ function GarminPanel(props: {
   ].filter((note): note is string => Boolean(note));
 
   return (
-    <Panel
-      title="Garmin Connect"
-      description="Import wykonanych aktywnosci zawodnika i publikacja zaplanowanych jednostek do kalendarza Garmin."
-      icon={Activity}
-    >
-      <div className="grid gap-2 sm:grid-cols-5">
-        <Metric
-          label="Status"
-          value={connected ? props.garmin.connection.mode ?? "OAuth" : "Brak"}
-        />
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 gap-2">
+        <Metric label="Status" value={connected ? props.garmin.connection.mode ?? "OAuth" : "Brak"} />
         <Metric label="Zgody" value={permissionsLabel} />
         <Metric label="Konfig" value={configLabel} />
-        <Metric label="Aktywnosci" value={props.garmin.activities.length} />
         <Metric label="Ostatni sync" value={lastSync} />
       </div>
 
       {connected && props.garmin.connection.permissionsKnown && props.garmin.connection.missingPermissions.length > 0 ? (
-        <div className="mt-3 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
+        <div className="rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
           Brak zgód Garmin: {props.garmin.connection.missingPermissions.join(", ")}.
         </div>
       ) : null}
       {connected && !props.garmin.connection.permissionsKnown ? (
-        <div className="mt-3 rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 text-sm text-[#5f6368]">
+        <div className="rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 text-sm text-[#5f6368]">
           Nie potwierdzono jeszcze zgód Garmin dla tego połączenia.
         </div>
       ) : null}
-
       {connected && isMock ? (
-        <div className="mt-3 rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3 text-sm text-[#315955]">
+        <div className="rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3 text-sm text-[#315955]">
           Garmin działa w trybie mock. Import i wysyłka są dostępne testowo dla tego konta.
         </div>
       ) : null}
 
-      <details className="mt-3 rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 text-sm">
+      <details className="rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3 text-sm">
         <summary className="cursor-pointer font-semibold text-[#123130]">
           Konfiguracja techniczna
         </summary>
@@ -2420,41 +2790,22 @@ function GarminPanel(props: {
             Brak konfiguracji produkcyjnej: {props.garmin.config.missing.join(", ")}.
           </div>
         ) : null}
-        <div className="mt-3 grid gap-2 lg:grid-cols-2">
-          <div>
-            <div className="text-xs font-semibold uppercase text-[#5f6368]">Redirect URI</div>
-            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
-              {props.garmin.config.redirectUri}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase text-[#5f6368]">Zgody API</div>
-            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
-              {props.garmin.config.requiredPermissions.join(" ") || "-"}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase text-[#5f6368]">Activities webhook</div>
-            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
-              {props.garmin.config.webhookUrls.activities}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase text-[#5f6368]">Permissions webhook</div>
-            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
-              {props.garmin.config.webhookUrls.permissions}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase text-[#5f6368]">Deregistration webhook</div>
-            <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">
-              {props.garmin.config.webhookUrls.deregistration}
-            </div>
-          </div>
+        <div className="mt-3 grid gap-2">
+          <TechnicalField label="Redirect URI" value={props.garmin.config.redirectUri} />
+          <TechnicalField
+            label="Zgody API"
+            value={props.garmin.config.requiredPermissions.join(" ") || "-"}
+          />
+          <TechnicalField label="Activities webhook" value={props.garmin.config.webhookUrls.activities} />
+          <TechnicalField label="Permissions webhook" value={props.garmin.config.webhookUrls.permissions} />
+          <TechnicalField
+            label="Deregistration webhook"
+            value={props.garmin.config.webhookUrls.deregistration}
+          />
         </div>
       </details>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-2">
         <label className="text-sm font-medium">
           Import od
           <input
@@ -2478,12 +2829,12 @@ function GarminPanel(props: {
         </label>
       </div>
       {importRangeInvalid ? (
-        <div className="mt-3 rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
+        <div className="rounded-lg border border-[#f0d6a6] bg-[#fff8e8] p-3 text-sm text-[#7a4d00]">
           Zakres importu Garmin musi mieć od 1 do {GARMIN_MAX_IMPORT_RANGE_DAYS} dni.
         </div>
       ) : null}
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-2 sm:grid-cols-2">
         <button
           className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
           disabled={props.busy}
@@ -2497,9 +2848,7 @@ function GarminPanel(props: {
           aria-disabled={Boolean(oauthDisabledReason)}
           className={clsx(
             "focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-4 py-2.5 text-sm font-semibold",
-            !oauthDisabledReason
-              ? "text-[#3c4043]"
-              : "pointer-events-none text-[#9aa0a6]"
+            !oauthDisabledReason ? "text-[#3c4043]" : "pointer-events-none text-[#9aa0a6]"
           )}
           href={!oauthDisabledReason ? "/api/garmin/oauth/start" : undefined}
         >
@@ -2544,7 +2893,7 @@ function GarminPanel(props: {
         </button>
       </div>
       {garminActionNotes.length > 0 ? (
-        <div className="mt-3 rounded-lg bg-[#f8fafb] p-3 text-xs leading-5 text-[#5f6368]">
+        <div className="rounded-lg bg-[#f8fafb] p-3 text-xs leading-5 text-[#5f6368]">
           <div className="font-semibold text-[#3c4043]">Dlaczego część akcji jest niedostępna?</div>
           <ul className="mt-1 list-disc space-y-1 pl-4">
             {garminActionNotes.map((note) => (
@@ -2554,102 +2903,84 @@ function GarminPanel(props: {
         </div>
       ) : null}
 
-      <div className="mt-4 grid gap-2 lg:grid-cols-2">
-        {props.garmin.activities.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-[#d9dee3] bg-[#f8fafb] p-4 text-sm text-[#5f6368]">
-            Brak zaimportowanych aktywnosci Garmin dla tego zawodnika.
-          </div>
-        ) : null}
-        {props.garmin.activities.map((activity) => (
-          <div
-            className="rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-3"
-            key={activity.id}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <div className="text-sm font-semibold">{activity.title}</div>
-                <div className="mt-1 text-xs text-[#5f6368]">
-                  {formatGarminActivityDate(activity)} - {activity.sport}
-                </div>
-                {activity.workoutTitle ? (
-                  <div className="mt-1 text-xs font-medium text-[#007f7a]">
-                    Plan: {activity.workoutTitle}
+      <section className="rounded-lg border border-[#e2e8eb] bg-white p-3">
+        <SectionHeading
+          description={`${props.garmin.activities.length} zaimportowanych aktywności`}
+          icon={Activity}
+          title="Aktywności Garmin"
+        />
+        <div className="mt-3 space-y-2">
+          {props.garmin.activities.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[#d9dee3] bg-[#f8fafb] p-4 text-sm text-[#5f6368]">
+              Brak zaimportowanych aktywności Garmin dla tego zawodnika.
+            </div>
+          ) : null}
+          {props.garmin.activities.map((activity) => (
+            <div className="rounded-lg border border-[#e2e8eb] bg-[#f8fafb] p-3" key={activity.id}>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold">{activity.title}</div>
+                  <div className="mt-1 text-xs text-[#5f6368]">
+                    {formatGarminActivityDate(activity)} · {activity.sport}
                   </div>
-                ) : null}
+                  {activity.workoutTitle ? (
+                    <div className="mt-1 text-xs font-medium text-[#007f7a]">
+                      Plan: {activity.workoutTitle}
+                    </div>
+                  ) : null}
+                </div>
+                <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
+                  {formatDistanceMeters(activity.distanceMeters)}
+                </span>
               </div>
-              <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
-                {formatDistanceMeters(activity.distanceMeters)}
-              </span>
+              <div className="mt-3 grid grid-cols-3 gap-2">
+                <Metric label="Czas" value={formatDurationShort(activity.durationSeconds)} />
+                <Metric
+                  label="Tempo"
+                  value={
+                    activity.avgPaceSecondsPerKm
+                      ? `${formatPaceSeconds(activity.avgPaceSecondsPerKm)}/km`
+                      : "-"
+                  }
+                />
+                <Metric label="HR" value={activity.avgHeartRate ?? "-"} />
+              </div>
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-2">
-              <Metric label="Czas" value={formatDurationShort(activity.durationSeconds)} />
-              <Metric
-                label="Tempo"
-                value={
-                  activity.avgPaceSecondsPerKm
-                    ? `${formatPaceSeconds(activity.avgPaceSecondsPerKm)}/km`
-                    : "-"
-                }
-              />
-              <Metric label="HR" value={activity.avgHeartRate ?? "-"} />
-            </div>
-          </div>
-        ))}
-      </div>
-    </Panel>
+          ))}
+        </div>
+      </section>
+    </div>
   );
 }
 
-function SummaryPanel(props: {
-  goals: GoalAllocation;
-  plan: TrainingPlan | null;
-  statusCounts: Record<WorkoutStatus, number>;
-  workoutsCount: number;
+function SectionHeading(props: {
+  description?: string;
+  icon: typeof Activity;
+  title: string;
 }) {
-  const sourceLabel =
-    props.plan?.source === "HUGGING_FACE"
-      ? "Hugging Face"
-      : props.plan?.source === "FALLBACK"
-        ? "Fallback regułowy"
-        : "Brak planu";
+  const Icon = props.icon;
 
   return (
-    <Panel
-      title="Podsumowanie tygodnia"
-      description="Stan zaplanowanych i zakończonych jednostek."
-      icon={Check}
-    >
-      <div className="grid grid-cols-2 gap-2">
-        <Metric label="Źródło" value={sourceLabel} />
-        <Metric label="Treningi" value={`${props.plan?.workouts.length ?? 0}/${props.workoutsCount}`} />
+    <div className="flex min-w-0 items-start gap-3">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#edf7f6] text-[#007f7a]">
+        <Icon size={16} />
+      </span>
+      <div className="min-w-0">
+        <h3 className="text-sm font-semibold text-[#123130]">{props.title}</h3>
+        {props.description ? (
+          <p className="mt-1 text-sm leading-5 text-[#5f6368]">{props.description}</p>
+        ) : null}
       </div>
-      <div className="mt-4 space-y-2">
-        {(Object.keys(goalLabels) as Array<keyof GoalAllocation>).map((key) => (
-          <div key={key}>
-            <div className="mb-1 flex justify-between text-xs text-[#5f6368]">
-              <span>{goalLabels[key]}</span>
-              <span>{props.goals[key]}%</span>
-            </div>
-            <div className="h-2 rounded-full bg-[#edf0f2]">
-              <div
-                className="h-2 rounded-full bg-[#007f7a]"
-                style={{ width: `${props.goals[key]}%` }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        {(Object.keys(statusLabels) as WorkoutStatus[]).map((status) => (
-          <Metric key={status} label={statusLabels[status]} value={props.statusCounts[status]} />
-        ))}
-      </div>
-      {props.plan?.requests?.[0]?.validationErrors ? (
-        <p className="mt-4 rounded-md bg-[#fff7f5] p-3 text-xs leading-5 text-[#c24135]">
-          AI odrzucone: {props.plan.requests[0].validationErrors}
-        </p>
-      ) : null}
-    </Panel>
+    </div>
+  );
+}
+
+function TechnicalField(props: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs font-semibold uppercase text-[#5f6368]">{props.label}</div>
+      <div className="mt-1 break-all font-mono text-xs text-[#3c4043]">{props.value}</div>
+    </div>
   );
 }
 
@@ -2659,389 +2990,5 @@ function Metric({ label, value }: { label: string; value: string | number }) {
       <div className="text-xs text-[#5f6368]">{label}</div>
       <div className="mt-1 text-sm font-semibold">{value}</div>
     </div>
-  );
-}
-
-function WorkoutEditor(props: {
-  busy: boolean;
-  canSendToGarmin: boolean;
-  garminActivity: GarminActivity | null;
-  workout: Workout | null;
-  weekDates: string[];
-  onAccept: (id: string) => void;
-  onChangeStatus: (id: string, status: WorkoutStatus) => void;
-  onExport: (id: string) => void;
-  onMoveWorkout: (workoutId: string, date: string) => void;
-  onSendToGarmin: (id: string) => void;
-  onPatch: (id: string, payload: Partial<Workout>) => Promise<Workout>;
-}) {
-  const [draft, setDraft] = useState<Workout | null>(props.workout);
-  const garminExportDisabledReason = !draft
-    ? null
-    : props.busy
-      ? "Poczekaj na zakończenie bieżącej operacji."
-      : !props.canSendToGarmin
-        ? "Połącz Garmin i upewnij się, że eksport treningów jest dostępny."
-        : draft.status === "DONE" || draft.status === "SKIPPED"
-          ? "Garmin przyjmuje tylko treningi zaplanowane lub zaakceptowane."
-          : null;
-  const garminExportDisabled = Boolean(garminExportDisabledReason);
-
-  if (!draft) {
-    return (
-      <Panel
-        title="Wybrany trening"
-        description="Tutaj pojawią się szczegóły jednostki i kolejne działania."
-        icon={ChevronRight}
-      >
-        <p className="rounded-lg bg-[#f8fafb] p-4 text-sm leading-6 text-[#5f6368]">
-          Wygeneruj plan i wybierz trening z kalendarza, aby go edytować lub oznaczyć jako
-          wykonany.
-        </p>
-      </Panel>
-    );
-  }
-
-  const segments = draft.segments ?? [];
-  const selectedWorkoutDate = normalizeDate(draft.date);
-  const updateDraftSegment = (index: number, patch: Partial<WorkoutSegment>) => {
-    setDraft({
-      ...draft,
-      segments: segments.map((segment, segmentIndex) =>
-        segmentIndex === index ? { ...segment, ...patch } : segment
-      )
-    });
-  };
-  const moveSelectedWorkout = (nextDate: string) => {
-    setDraft({ ...draft, date: nextDate });
-    props.onMoveWorkout(draft.id, nextDate);
-  };
-
-  return (
-    <Panel
-      title="Wybrany trening"
-      description="Popraw szczegóły, następnie zaakceptuj lub rozlicz jednostkę."
-      icon={ChevronRight}
-    >
-      <div className="mb-4 flex items-start justify-between gap-3 rounded-lg bg-[#f8fafb] p-3">
-        <div>
-          <p className="text-sm font-semibold">{draft.title}</p>
-          <p className="mt-1 text-xs text-[#5f6368]">
-            {normalizeDate(draft.date)} · {draft.durationMin} min · {draft.zoneName}
-          </p>
-        </div>
-        <span
-          className={clsx(
-            "rounded-md px-2 py-1 text-xs font-semibold",
-            draft.status === "DONE" || draft.status === "EXPORTED"
-              ? "bg-[#eaf7ed] text-[#2f8d46]"
-              : draft.status === "SKIPPED"
-                ? "bg-[#fff4ef] text-[#c24135]"
-                : "bg-[#edf7f6] text-[#007f7a]"
-          )}
-        >
-          {statusLabels[draft.status]}
-        </span>
-      </div>
-      {props.garminActivity ? (
-        <div className="mb-4 rounded-lg border border-[#b9ddda] bg-[#effbf9] p-3">
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <div className="text-sm font-semibold text-[#123130]">Garmin wykonanie</div>
-              <div className="mt-1 text-xs text-[#456461]">
-                {formatGarminActivityDate(props.garminActivity)} - {props.garminActivity.title}
-              </div>
-            </div>
-            <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
-              {formatDistanceMeters(props.garminActivity.distanceMeters)}
-            </span>
-          </div>
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            <Metric label="Czas" value={formatDurationShort(props.garminActivity.durationSeconds)} />
-            <Metric
-              label="Tempo"
-              value={
-                props.garminActivity.avgPaceSecondsPerKm
-                  ? `${formatPaceSeconds(props.garminActivity.avgPaceSecondsPerKm)}/km`
-                  : "-"
-              }
-            />
-            <Metric label="HR" value={props.garminActivity.avgHeartRate ?? "-"} />
-          </div>
-        </div>
-      ) : null}
-      <div className="grid gap-3">
-        <label className="text-sm font-medium">
-          Nazwa
-          <input
-            className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            value={draft.title}
-            onChange={(event) => setDraft({ ...draft, title: event.target.value })}
-          />
-        </label>
-        <div className="grid grid-cols-2 gap-2">
-          <label className="text-sm font-medium">
-            Data
-            <input
-              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-              type="date"
-              value={normalizeDate(draft.date)}
-              onChange={(event) => setDraft({ ...draft, date: event.target.value })}
-            />
-          </label>
-          <label className="text-sm font-medium">
-            Minuty
-            <input
-              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-              min={10}
-              type="number"
-              value={draft.durationMin}
-              onChange={(event) => setDraft({ ...draft, durationMin: Number(event.target.value) })}
-            />
-          </label>
-        </div>
-        <label className="text-sm font-medium">
-          Przenieś na dzień
-          <select
-            className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            disabled={props.busy}
-            value={selectedWorkoutDate}
-            onChange={(event) => moveSelectedWorkout(event.currentTarget.value)}
-          >
-            {props.weekDates.map((date, index) => (
-              <option key={date} value={date}>
-                {dayLabels[index]} {date.slice(5)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="grid grid-cols-2 gap-2">
-          <label className="text-sm font-medium">
-            Cel
-            <input
-              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-              value={draft.goal}
-              onChange={(event) => setDraft({ ...draft, goal: event.target.value })}
-            />
-          </label>
-          <label className="text-sm font-medium">
-            Strefa
-            <input
-              className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-              value={draft.zoneName}
-              onChange={(event) => setDraft({ ...draft, zoneName: event.target.value })}
-            />
-          </label>
-        </div>
-        <label className="text-sm font-medium">
-          Intensywność
-          <input
-            className="focus-ring mt-1 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            value={draft.intensity}
-            onChange={(event) => setDraft({ ...draft, intensity: event.target.value })}
-          />
-        </label>
-        <label className="text-sm font-medium">
-          Struktura
-          <textarea
-            className="focus-ring mt-1 min-h-28 w-full rounded-lg border border-[#c7cdd2] px-3 py-2.5 text-sm"
-            value={draft.structure}
-            onChange={(event) => setDraft({ ...draft, structure: event.target.value })}
-          />
-        </label>
-        <div className="rounded-lg border border-[#d9dee3] bg-[#f8fafb] p-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold">Segmenty tempa i tetna</div>
-              <div className="mt-1 text-xs text-[#5f6368]">
-                Segmenty sa zrodlem prawdy dla zakresow min/km i bpm.
-              </div>
-            </div>
-            <span className="shrink-0 rounded-md bg-white px-2 py-1 text-xs font-semibold text-[#007f7a]">
-              {segments.reduce((sum, segment) => sum + segment.durationMin, 0)} min
-            </span>
-          </div>
-          {segments.length === 0 ? (
-            <div className="mt-3 rounded-md border border-dashed border-[#c7cdd2] bg-white p-3 text-sm text-[#5f6368]">
-              Ten trening nie ma jeszcze segmentow. Eksporty uzyja opisu tekstowego.
-            </div>
-          ) : (
-            <div className="mt-3 space-y-2">
-              {segments.map((segment, index) => (
-                <div
-                  className="grid gap-2 rounded-md border border-[#e2e8eb] bg-white p-3 md:grid-cols-[1.2fr_80px_80px_1fr_1fr_1fr]"
-                  key={segment.id ?? `${segment.label}-${index}`}
-                >
-                  <label className="text-xs font-medium text-[#5f6368]">
-                    Segment
-                    <input
-                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
-                      value={segment.label}
-                      onChange={(event) =>
-                        updateDraftSegment(index, { label: event.target.value })
-                      }
-                    />
-                  </label>
-                  <label className="text-xs font-medium text-[#5f6368]">
-                    Min
-                    <input
-                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
-                      min={1}
-                      type="number"
-                      value={segment.durationMin}
-                      onChange={(event) =>
-                        updateDraftSegment(index, { durationMin: Number(event.target.value) })
-                      }
-                    />
-                  </label>
-                  <label className="text-xs font-medium text-[#5f6368]">
-                    Strefa
-                    <input
-                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
-                      value={segment.zoneName}
-                      onChange={(event) =>
-                        updateDraftSegment(index, { zoneName: event.target.value })
-                      }
-                    />
-                  </label>
-                  <label className="text-xs font-medium text-[#5f6368]">
-                    Tempo min/max
-                    <div className="mt-1 grid grid-cols-2 gap-1">
-                      <PaceInput
-                        ariaLabel={`Tempo minimalne segmentu ${index + 1}`}
-                        value={segment.paceMinSecPerKm}
-                        onChange={(value) =>
-                          updateDraftSegment(index, { paceMinSecPerKm: value })
-                        }
-                      />
-                      <PaceInput
-                        ariaLabel={`Tempo maksymalne segmentu ${index + 1}`}
-                        value={segment.paceMaxSecPerKm}
-                        onChange={(value) =>
-                          updateDraftSegment(index, { paceMaxSecPerKm: value })
-                        }
-                      />
-                    </div>
-                    <span className="mt-1 block text-[11px]">{formatPaceRange(segment)}</span>
-                  </label>
-                  <label className="text-xs font-medium text-[#5f6368]">
-                    HR min/max
-                    <div className="mt-1 grid grid-cols-2 gap-1">
-                      <input
-                        className="focus-ring w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
-                        min={1}
-                        type="number"
-                        value={segment.heartRateMinBpm}
-                        onChange={(event) =>
-                          updateDraftSegment(index, {
-                            heartRateMinBpm: Number(event.target.value)
-                          })
-                        }
-                      />
-                      <input
-                        className="focus-ring w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
-                        min={1}
-                        type="number"
-                        value={segment.heartRateMaxBpm}
-                        onChange={(event) =>
-                          updateDraftSegment(index, {
-                            heartRateMaxBpm: Number(event.target.value)
-                          })
-                        }
-                      />
-                    </div>
-                    <span className="mt-1 block text-[11px]">
-                      {formatHeartRateRange(segment)}
-                    </span>
-                  </label>
-                  <label className="text-xs font-medium text-[#5f6368]">
-                    Intensywnosc
-                    <input
-                      className="focus-ring mt-1 w-full rounded-md border border-[#c7cdd2] px-2 py-2 text-sm text-[#202124]"
-                      value={segment.intensity}
-                      onChange={(event) =>
-                        updateDraftSegment(index, { intensity: event.target.value })
-                      }
-                    />
-                  </label>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="border-t border-[#e2e8eb] pt-4">
-          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
-            Edycja
-          </div>
-          <button
-            className="focus-ring flex w-full items-center justify-center gap-2 rounded-lg border border-[#007f7a] bg-white px-4 py-2.5 text-sm font-semibold text-[#007f7a]"
-            disabled={props.busy}
-            type="button"
-            onClick={() => void props.onPatch(draft.id, draft)}
-          >
-            <Save size={16} />
-            Zapisz zmiany
-          </button>
-        </div>
-        <div className="border-t border-[#e2e8eb] pt-4">
-          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
-            Decyzja treningowa
-          </div>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <button
-              className="focus-ring flex items-center justify-center gap-2 rounded-lg bg-[#007f7a] px-3 py-2.5 text-sm font-semibold text-white"
-              disabled={props.busy}
-              type="button"
-              onClick={() => void props.onAccept(draft.id)}
-            >
-              <Check size={16} />
-              Akceptuj
-            </button>
-            {(["DONE", "SKIPPED"] as WorkoutStatus[]).map((status) => (
-              <button
-                className="focus-ring rounded-lg bg-[#f8fafb] px-3 py-2.5 text-sm font-semibold text-[#3c4043]"
-                disabled={props.busy}
-                key={status}
-                type="button"
-                onClick={() => void props.onChangeStatus(draft.id, status)}
-              >
-                {status === "DONE" ? "Oznacz wykonany" : "Oznacz pominięty"}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="border-t border-[#e2e8eb] pt-4">
-          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#5f6368]">
-            Eksport
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <button
-              className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
-              disabled={props.busy}
-              type="button"
-              onClick={() => void props.onExport(draft.id)}
-            >
-              <Download size={16} />
-              TrainingPeaks
-            </button>
-            <button
-              aria-describedby={garminExportDisabledReason ? "garmin-workout-disabled" : undefined}
-              className="focus-ring flex items-center justify-center gap-2 rounded-lg border border-[#d9dee3] px-3 py-2.5 text-sm font-semibold"
-              disabled={garminExportDisabled}
-              type="button"
-              onClick={() => void props.onSendToGarmin(draft.id)}
-            >
-              <UploadCloud size={16} />
-              Garmin
-            </button>
-          </div>
-          {garminExportDisabledReason ? (
-            <p id="garmin-workout-disabled" className="mt-2 text-xs leading-5 text-[#5f6368]">
-              Garmin: {garminExportDisabledReason}
-            </p>
-          ) : null}
-        </div>
-      </div>
-    </Panel>
   );
 }
